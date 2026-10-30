@@ -1,0 +1,357 @@
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Windows.Forms;
+
+namespace TxtFormatSetup
+{
+    /// <summary>
+    /// 向导外壳：左侧色带 + 右侧白底内容区 + 底部按钮栏。
+    /// 坐标按 96dpi 书写，运行时按 DPI 等比放大。
+    /// </summary>
+    public class WizardShell : Form
+    {
+        // 中性色固定；品牌色（色带两端、强调色）全部由程序图标派生，见 Theme.cs / 安装器设计规范
+        public static Color Ink { get { return Theme.Ink; } }
+        public static Color Muted { get { return Theme.Muted; } }
+        public static Color Dim { get { return Theme.Dim; } }
+        public static Color Accent { get { return Theme.Accent; } }
+        public static Color LineGray { get { return Theme.Line; } }
+        public static Color BannerTop { get { return Theme.BandTop; } }
+        public static Color BannerBottom { get { return Theme.BandBottom; } }
+
+        protected float K = 1f;
+        protected Panel Body;
+        protected Label TitleLabel;
+        protected Button Back, NextBtn, CancelBtn;
+
+        readonly Font _uiFont = new Font("Microsoft YaHei UI", 9f);
+        readonly int _w, _h;
+        readonly string _subtitle;
+        Image _appIcon;
+        bool _plate;
+        bool _built;
+
+        protected WizardShell(string windowTitle, int width, int height, string subtitle)
+        {
+            _w = width;
+            _h = height;
+            _subtitle = subtitle;
+            Text = windowTitle;
+            AutoScaleMode = AutoScaleMode.None;      // 自己按 DPI 缩放，交给 WinForms 会算错
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowIcon = true;
+            StartPosition = FormStartPosition.CenterScreen;
+            BackColor = Color.White;
+            Font = _uiFont;
+            ClientSize = new Size(width, height);
+
+            // 图标是整套配色的唯一种子：先取它，再算 Theme，再画界面
+            try
+            {
+                var ico = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                if (ico != null)
+                {
+                    Icon = ico;
+                    using (var big = new Icon(ico, 256, 256))
+                        _appIcon = big.ToBitmap();
+
+                    Theme.Build(_appIcon);
+
+                    // 图标和色带同色系会糊在一起，这时垫一块底板（规范 §二.3）
+                    _plate = Math.Abs(Theme.AverageLightness(_appIcon) - 0.33) < 0.12;
+                }
+            }
+            catch { }
+        }
+
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+            if (_built) return;
+            _built = true;
+
+            // Form.DeviceDpi 在系统 DPI 感知进程里可能仍报 96，这里直接问绘图上下文
+            try
+            {
+                using (var g = CreateGraphics()) K = g.DpiX / 96f;
+            }
+            catch { K = 1f; }
+            if (K < 0.8f || K > 4f) K = 1f;
+
+            ClientSize = Z(_w, _h);
+            BuildShell(_w, _h, _subtitle);
+            BuildPages();
+            ShowPage(0);
+        }
+
+        /// <summary>子类在这里注册页面。</summary>
+        protected virtual void BuildPages() { }
+
+        /// <summary>子类在这里渲染指定页面。</summary>
+        protected virtual void ShowPage(int index) { }
+
+        // ------------------------------------------------------------ 缩放辅助
+        protected int S(int v) { return (int)Math.Round(v * K); }
+        protected Point P(int x, int y) { return new Point(S(x), S(y)); }
+        protected Size Z(int w, int h) { return new Size(S(w), S(h)); }
+
+        static GraphicsPath Round(Rectangle r, int radius)
+        {
+            var p = new GraphicsPath();
+            int d = radius * 2;
+            if (d <= 0) { p.AddRectangle(r); return p; }
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        void BuildShell(int w, int h, string subtitle)
+        {
+            // ---- 左侧色带
+            var banner = new Panel { Location = P(0, 0), Size = Z(164, h), BackColor = BannerTop };
+            banner.Paint += delegate(object s, PaintEventArgs e)
+            {
+                var r = banner.ClientRectangle;
+                if (r.Width <= 1 || r.Height <= 1) return;
+                using (var br = new LinearGradientBrush(r, BannerTop, BannerBottom, 90f))
+                    e.Graphics.FillRectangle(br, r);
+
+                // 图标与色带同色系时垫一块底板，否则图标边界会消失在色带里
+                if (!_plate) return;
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                var box = new Rectangle(S(46), S(30), S(72), S(72));
+                using (var path = Round(box, S(14)))
+                {
+                    using (var fill = new SolidBrush(Color.FromArgb(36, 255, 255, 255)))
+                        e.Graphics.FillPath(fill, path);
+                    using (var pen = new Pen(Color.FromArgb(56, 255, 255, 255), Math.Max(1f, S(1))))
+                        e.Graphics.DrawPath(pen, path);
+                }
+            };
+            Controls.Add(banner);
+
+            var logo = new PictureBox
+            {
+                Location = P(50, 34),
+                Size = Z(64, 64),
+                SizeMode = PictureBoxSizeMode.Zoom,
+                BackColor = Color.Transparent,
+                Image = _appIcon
+            };
+            banner.Controls.Add(logo);
+
+            banner.Controls.Add(new Label
+            {
+                Text = Program.AppName,
+                Font = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold),
+                ForeColor = Color.White,
+                BackColor = Color.Transparent,
+                Location = P(10, 108),
+                Size = Z(144, 24),
+                TextAlign = ContentAlignment.MiddleCenter
+            });
+
+            banner.Controls.Add(new Label
+            {
+                Text = "v" + Program.Version,
+                Font = new Font("Microsoft YaHei UI", 8.5f),
+                ForeColor = Color.FromArgb(200, 255, 255, 255),
+                BackColor = Color.Transparent,
+                Location = P(10, 132),
+                Size = Z(144, 18),
+                TextAlign = ContentAlignment.MiddleCenter
+            });
+
+            banner.Controls.Add(new Panel
+            {
+                Location = P(32, 160),
+                Size = Z(100, 1),
+                BackColor = Color.FromArgb(70, 255, 255, 255)
+            });
+
+            banner.Controls.Add(new Label
+            {
+                Text = subtitle,
+                Font = new Font("Microsoft YaHei UI", 8.5f),
+                ForeColor = Color.FromArgb(215, 255, 255, 255),
+                BackColor = Color.Transparent,
+                Location = P(10, 172),
+                Size = Z(144, 40),
+                TextAlign = ContentAlignment.TopCenter
+            });
+
+            banner.Controls.Add(new Label
+            {
+                Text = Program.Author + "\n" + Program.Email,
+                Font = new Font("Microsoft YaHei UI", 7.5f),
+                ForeColor = Color.FromArgb(170, 255, 255, 255),
+                BackColor = Color.Transparent,
+                Location = P(10, h - 56),
+                Size = Z(144, 40),
+                TextAlign = ContentAlignment.BottomCenter
+            });
+
+            // ---- 右侧内容区
+            var content = new Panel
+            {
+                Location = P(164, 0),
+                Size = Z(w - 164, h),
+                BackColor = Color.White
+            };
+            Controls.Add(content);
+
+            TitleLabel = new Label
+            {
+                Location = P(24, 20),
+                Size = Z(w - 164 - 48 - 44, 26),
+                Font = new Font("Microsoft YaHei UI", 14f, FontStyle.Bold),
+                ForeColor = Ink,
+                BackColor = Color.White,
+                AutoEllipsis = true
+            };
+            content.Controls.Add(TitleLabel);
+
+            var corner = new PictureBox
+            {
+                Location = P(w - 164 - 32 - 20, 18),
+                Size = Z(32, 32),
+                SizeMode = PictureBoxSizeMode.Zoom,
+                BackColor = Color.White,
+                Image = _appIcon
+            };
+            content.Controls.Add(corner);
+
+            Body = new Panel
+            {
+                Location = P(24, 58),
+                Size = Z(w - 164 - 48, h - 58 - 78),
+                BackColor = Color.White
+            };
+            content.Controls.Add(Body);
+
+            content.Controls.Add(new Panel
+            {
+                Location = P(24, h - 74),
+                Size = Z(w - 164 - 48, 1),
+                BackColor = LineGray
+            });
+
+            // ---- 底部按钮（先建，再统一交给 LayoutButtons 定位）
+            CancelBtn = MakeButton("取消", 0, 0, 86, 28);
+            NextBtn = MakeButton("下一步", 0, 0, 86, 28);
+            Back = MakeButton("上一步", 0, 0, 86, 28);
+            content.Controls.Add(Back);
+            content.Controls.Add(NextBtn);
+            content.Controls.Add(CancelBtn);
+
+            LayoutButtons(86);
+
+            AcceptButton = NextBtn;
+            CancelButton = CancelBtn;
+        }
+
+        /// <summary>
+        /// 重排底部三键。默认 86px；某些页（如「正在运行」）按钮文字更长，需要更宽的按钮，
+        /// 这里统一从右边缘往左排，避免文字被折成两行。
+        /// </summary>
+        protected void LayoutButtons(int nextWidth)
+        {
+            const int bw = 86, bh = 28, gap = 8;
+            int by = _h - 56;
+            int rightEdge = _w - 164 - 24;
+
+            CancelBtn.Size = Z(bw, bh);
+            CancelBtn.Location = P(rightEdge - bw, by);
+
+            NextBtn.Size = Z(nextWidth, bh);
+            NextBtn.Location = P(rightEdge - bw - gap - nextWidth, by);
+
+            Back.Size = Z(bw, bh);
+            Back.Location = P(rightEdge - bw - gap - nextWidth - gap - bw, by);
+        }
+
+        Button MakeButton(string text, int x, int y, int w, int h)
+        {
+            var b = new Button
+            {
+                Text = text,
+                Location = P(x, y),
+                Size = Z(w, h),
+                FlatStyle = FlatStyle.System,
+                Font = _uiFont
+            };
+            return b;
+        }
+
+        // ------------------------------------------------------------ 页面构件
+        protected Label L(string text, int x, int y, int w, int h)
+        {
+            var lbl = new Label
+            {
+                Text = text,
+                Location = P(x, y),
+                Size = Z(w, h),
+                ForeColor = Muted,
+                BackColor = Color.White
+            };
+            Body.Controls.Add(lbl);
+            return lbl;
+        }
+
+        protected Label Strong(string text, int x, int y, int w, int h)
+        {
+            var lbl = new Label
+            {
+                Text = text,
+                Location = P(x, y),
+                Size = Z(w, h),
+                ForeColor = Ink,
+                BackColor = Color.White,
+                Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold)
+            };
+            Body.Controls.Add(lbl);
+            return lbl;
+        }
+
+        protected CheckBox Check(string text, int x, int y, int w, bool on)
+        {
+            var c = new CheckBox
+            {
+                Text = text,
+                Checked = on,
+                Location = P(x, y),
+                Size = Z(w, 24),
+                ForeColor = Ink,
+                BackColor = Color.White
+            };
+            Body.Controls.Add(c);
+            return c;
+        }
+
+        protected Button SmallButton(string text, int x, int y, int w, int h)
+        {
+            var b = MakeButton(text, x, y, w, h);
+            Body.Controls.Add(b);
+            return b;
+        }
+
+        protected TextBox Box(string text, int x, int y, int w, int h)
+        {
+            var t = new TextBox
+            {
+                Text = text,
+                Location = P(x, y),
+                Size = Z(w, h),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            Body.Controls.Add(t);
+            return t;
+        }
+    }
+}

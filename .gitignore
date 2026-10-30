@@ -1,0 +1,40 @@
+# 虚拟环境与构建产物
+.venv/
+build/
+dist/
+artifacts/
+*.egg-info/
+.sync-backup/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 打包/编译中间文件
+installer/*.log
+*.log
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.pdb
+payload.zip
+
+# 同步工具自己的记账（不属于仓库内容）
+.sync-state.json
+
+# 自检产物（--selftest 会在输出目录生成，默认落在项目根）
+selftest.json
+selftest-window.png
+
+# 编辑器与系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# 程序本机运行产物（设置现与 exe 同目录，开发跑测试会落在项目根）
+config.json
+error.log

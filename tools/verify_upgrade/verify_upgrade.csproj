@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 一次性校验工程：把安装器主程序的 Program.cs 直接编进来，
+       用假 exe 造出「更新 / 重装 / 降级 / 版本读不出」四种目录，验证 §三.3 的判定逻辑。
+       规范 §三.3 明确要求判定逻辑能被单独测试 —— GUI 驱动不可靠，测纯逻辑才行。
+
+       cd tools/verify_upgrade 然后 dotnet run                # 跑全部
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>verify_upgrade</AssemblyName>
+    <RootNamespace>VerifyUpgrade</RootNamespace>
+    <DebugType>none</DebugType>
+    <Deterministic>true</Deterministic>
+    <StartupObject>VerifyUpgrade.Entry</StartupObject>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 直接把安装器源码编进来，不复制、不同步，改了源码这里立刻跟着变。
+         UI 文件只是为了让 Program.cs 能编过（它引用了 InstallForm / UninstallForm），
+         本工程只调用其中的纯逻辑静态方法，不建窗口。 -->
+    <Compile Include="..\..\installer\winforms\Program.cs" />
+    <Compile Include="..\..\installer\winforms\Theme.cs" />
+    <Compile Include="..\..\installer\winforms\Controls.cs" />
+    <Compile Include="..\..\installer\winforms\WizardShell.cs" />
+    <Compile Include="..\..\installer\winforms\InstallForm.cs" />
+    <Compile Include="..\..\installer\winforms\UninstallForm.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+
+</Project>

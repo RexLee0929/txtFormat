@@ -1,0 +1,33 @@
+# 拼音还原表：左边是文档中出现的拼音写法，右边是还原后的汉字。
+# 一行一条，# 开头为注释。带声调符号与数字标调两种写法都支持。
+sè=色
+sèqíng=色情
+xìng=性
+xìngjiāo=性交
+luǒ=裸
+luǒtǐ=裸体
+jiān=奸
+yín=淫
+yíndàng=淫荡
+qiángjiān=强奸
+mài yín=卖淫
+chāng=娼
+jì=妓
+jìn shū=禁书
+mǐn gǎn=敏感
+bào lì=暴力
+tú shā=屠杀
+shī tǐ=尸体
+xuè xīng=血腥
+zì shā=自杀
+xī dú=吸毒
+dà má=大麻
+zhà dàn=炸弹
+qiāng zhī=枪支
+gāo cháo=高潮
+zuò ài=做爱
+sao=骚
+sāo=骚
+dàng=荡
+rǔ=乳
+tún=臀

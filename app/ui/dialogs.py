@@ -1,0 +1,739 @@
+"""各类对话框：格式整理选项、章节整理/分割、合并/更名、快速审核、转到、重编码、关于。"""
+
+from __future__ import annotations
+
+import os
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox,
+                               QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+                               QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+                               QMessageBox, QPushButton, QRadioButton, QSpinBox, QTableWidget,
+                               QTableWidgetItem, QTextBrowser, QToolTip, QVBoxLayout,
+                               QWidget)
+
+from ..core import chapter as chapter_mod
+from ..core import checkers, encoding as enc
+from ..core.settings import Settings
+from ..core.version import (APP_NAME, APP_SUBTITLE, APP_VERSION, AUTHOR, AUTHOR_EMAIL,
+                            COPYRIGHT)
+from . import icons
+from .theme import ACCENT, Color
+from .widgets import (Caption, CommandButton, CopyChip, IconButton, PrimaryButton,
+                      SectionLabel)
+
+
+class BaseDialog(QDialog):
+    def __init__(self, title: str, parent: QWidget | None = None, width: int = 560):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(width)
+        self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+        self.root = QVBoxLayout(self)
+        self.root.setContentsMargins(20, 18, 20, 18)
+        self.root.setSpacing(14)
+
+    def add_footer(self, ok_text: str = "确定", cancel_text: str = "取消") -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addStretch(1)
+        if cancel_text:
+            cancel = QPushButton(cancel_text)
+            cancel.clicked.connect(self.reject)
+            row.addWidget(cancel)
+        ok = PrimaryButton(ok_text)
+        ok.clicked.connect(self.accept)
+        ok.setDefault(True)
+        row.addWidget(ok)
+        self.root.addLayout(row)
+        return row
+
+
+def _radio_group(options: list[tuple[str, str]], current: str, on_change) -> tuple[QWidget, dict[str, QRadioButton]]:
+    box = QWidget()
+    layout = QHBoxLayout(box)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(14)
+    group = QButtonGroup(box)
+    buttons: dict[str, QRadioButton] = {}
+    for label, value in options:
+        rb = QRadioButton(label)
+        rb.setChecked(value == current)
+        rb.toggled.connect(lambda checked, v=value: checked and on_change(v))
+        group.addButton(rb)
+        buttons[value] = rb
+        layout.addWidget(rb)
+    layout.addStretch(1)
+    return box, buttons
+
+
+# ------------------------------------------------------------------ 选项
+class OptionsDialog(BaseDialog):
+    def __init__(self, settings: Settings, parent: QWidget | None = None):
+        super().__init__("格式整理选项", parent, 620)
+        self.settings = settings
+
+        self.root.addWidget(SectionLabel("格式整理选项"))
+        self.root.addWidget(Caption("这些设置直接决定“格式整理”按钮的处理结果，也影响 Tab / Shift+Tab 的缩进效果。"))
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(10)
+        row = 0
+
+        def add_row(label: str, widget: QWidget) -> None:
+            nonlocal row
+            lab = QLabel(label)
+            lab.setMinimumWidth(110)
+            grid.addWidget(lab, row, 0, Qt.AlignmentFlag.AlignVCenter)
+            grid.addWidget(widget, row, 1)
+            row += 1
+
+        punct_widget, _ = _radio_group(
+            [("转换为全角", "full"), ("转换为半角", "half"), ("不转换（保持原样）", "keep")],
+            settings.punct_mode, lambda v: setattr(settings, "punct_mode", v))
+        add_row("标点符号处理", punct_widget)
+
+        eng_widget, _ = _radio_group(
+            [("转换为全角", "full"), ("转换为半角", "half"), ("不转换", "keep")],
+            settings.english_mode, lambda v: setattr(settings, "english_mode", v))
+        add_row("英文字符处理", eng_widget)
+
+        num_widget, _ = _radio_group(
+            [("转换为全角", "full"), ("转换为半角", "half"), ("不转换", "keep")],
+            settings.number_mode, lambda v: setattr(settings, "number_mode", v))
+        add_row("数值处理", num_widget)
+
+        para_widget, _ = _radio_group(
+            [("隔一行", "blank"), ("不隔行", "none"), ("不处理（保持原样）", "keep")],
+            settings.para_spacing, lambda v: setattr(settings, "para_spacing", v))
+        add_row("段落间的隔行处理", para_widget)
+
+        indent_widget, _ = _radio_group(
+            [("半角空格", "half"), ("全角空格", "full"), ("制表符", "tab"), ("无缩进", "none")],
+            settings.indent_kind, lambda v: setattr(settings, "indent_kind", v))
+        add_row("行首缩进", indent_widget)
+
+        indent_row = QWidget()
+        indent_layout = QHBoxLayout(indent_row)
+        indent_layout.setContentsMargins(0, 0, 0, 0)
+        indent_layout.setSpacing(8)
+        self.indent_spin = QSpinBox()
+        self.indent_spin.setRange(0, 10)
+        self.indent_spin.setValue(settings.indent_count)
+        self.indent_spin.valueChanged.connect(lambda v: setattr(settings, "indent_count", v))
+        indent_layout.addWidget(self.indent_spin)
+        indent_layout.addWidget(QLabel("个"))
+        indent_layout.addStretch(1)
+        add_row("缩进个数", indent_row)
+
+        width_row = QWidget()
+        width_layout = QHBoxLayout(width_row)
+        width_layout.setContentsMargins(0, 0, 0, 0)
+        width_layout.setSpacing(8)
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(10, 255)
+        self.width_spin.setValue(settings.hard_return_width)
+        self.width_spin.valueChanged.connect(lambda v: setattr(settings, "hard_return_width", v))
+        width_layout.addWidget(self.width_spin)
+        width_layout.addWidget(QLabel("字（10–255）"))
+        width_layout.addStretch(1)
+        add_row("去掉硬回车时的行宽", width_row)
+
+        self.root.addLayout(grid)
+
+        checks = QGridLayout()
+        checks.setHorizontalSpacing(16)
+        checks.setVerticalSpacing(6)
+        self._checks: dict[str, QCheckBox] = {}
+        options = [
+            ("auto_hard_return", "自动处理硬回车"),
+            ("has_ad", "文档中包含有广告"),
+            ("split_by_period", "以句号为段落标记重新分段"),
+            ("remove_spaces_in_text", "除去非标题行中的空格"),
+            ("convert_unicode_code", "把 Unicode 码转成汉字"),
+            ("restore_screened", "还原屏蔽码（如“少*妇”）"),
+            ("restore_pinyin", "还原拼音（如“sè”）"),
+            ("fix_punct_combo", "规范不合法的标点组合"),
+            ("recursive", "处理子目录中的文件"),
+            ("sort_by_number", "按文件名中的数字排序"),
+        ]
+        for i, (key, label) in enumerate(options):
+            cb = QCheckBox(label)
+            cb.setChecked(bool(getattr(settings, key)))
+            cb.toggled.connect(lambda v, k=key: setattr(settings, k, v))
+            if key == "convert_unicode_code":
+                cb.setToolTip("把文档中形如 &#29234; / &#x7232; 的字符引用还原成汉字")
+            elif key == "restore_screened":
+                cb.setToolTip("把“少*妇”“成*人”这类被星号屏蔽的词还原，词表见 data/screened.txt")
+            elif key == "restore_pinyin":
+                cb.setToolTip("把“sè”“xìng”这类拼音还原成汉字，词表见 data/pinyin.txt")
+            self._checks[key] = cb
+            checks.addWidget(cb, i % 5, i // 5)
+        self.root.addLayout(checks)
+
+        bottom = QHBoxLayout()
+        reset = CommandButton("恢复默认设置", "refresh")
+        reset.clicked.connect(self._reset)
+        bottom.addWidget(reset)
+        bottom.addStretch(1)
+        self.root.addLayout(bottom)
+
+        self.add_footer()
+
+    def _reset(self) -> None:
+        self.settings.reset_format_options()
+        defaults = Settings()
+        for key, cb in self._checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(bool(getattr(defaults, key)))
+            cb.blockSignals(False)
+            setattr(self.settings, key, getattr(defaults, key))
+        self.indent_spin.setValue(self.settings.indent_count)
+        self.width_spin.setValue(self.settings.hard_return_width)
+        QMessageBox.information(self, "提示", "选项已恢复为默认值！")
+
+
+# ------------------------------------------------------------------ 章节
+class SplitDialog(BaseDialog):
+    """文件分割 / 章节整理。"""
+
+    def __init__(self, text: str, settings: Settings, parent: QWidget | None = None):
+        super().__init__("文件分割 / 章节整理", parent, 860)
+        self.resize(900, 620)
+        self.text = text
+        self.settings = settings
+        self.chapters: list[chapter_mod.Chapter] = []
+        self.result_text: str = text
+        self.split_requested: dict | None = None
+        self.title_mode = "cn"
+
+        self.root.addWidget(SectionLabel("文件分割 / 章节整理"))
+
+        top = QGridLayout()
+        top.setHorizontalSpacing(10)
+        top.setVerticalSpacing(8)
+        top.addWidget(QLabel("请输入新的文件名前缀"), 0, 0)
+        self.prefix_edit = QLineEdit()
+        self.prefix_edit.setPlaceholderText("盘符、路径及扩展名不必输入")
+        top.addWidget(self.prefix_edit, 0, 1, 1, 3)
+
+        top.addWidget(QLabel("章节名正则表达式"), 1, 0)
+        self.pattern_combo = QComboBox()
+        self.pattern_combo.setEditable(True)
+        for label, pattern in chapter_mod.CHAPTER_FORMATS:
+            self.pattern_combo.addItem(f"{label}", pattern)
+        self.pattern_combo.setMinimumHeight(32)
+        self.pattern_combo.currentIndexChanged.connect(self._sync_pattern_text)
+        self._sync_pattern_text()
+        top.addWidget(self.pattern_combo, 1, 1, 1, 2)
+        refresh = CommandButton("重新获取章节名", "refresh")
+        refresh.clicked.connect(self.reload_chapters)
+        top.addWidget(refresh, 1, 3)
+        self.root.addLayout(top)
+
+        self.chapter_summary = Caption("")
+        self.root.addWidget(self.chapter_summary)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["章节标题", "章节大小", "顺序"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(1, 92)
+        self.table.horizontalHeaderItem(0).setTextAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.table.setColumnWidth(2, 78)
+        self.root.addWidget(self.table, 1)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
+        btn_norm = CommandButton("规范化章节标题", "format")
+        btn_norm.clicked.connect(self._normalize_titles)
+        btn_reorder = CommandButton("重排章节顺序", "list")
+        btn_reorder.clicked.connect(self._reorder)
+        btn_export = CommandButton("导出章节标题列表", "save")
+        btn_export.clicked.connect(self._export_titles)
+        btn_drop_name = CommandButton("删除选定章节名", "trash")
+        btn_drop_name.clicked.connect(self._remove_names)
+        btn_drop = CommandButton("删除选定章节", "trash")
+        btn_drop.clicked.connect(self._remove_chapters)
+        for b in (btn_norm, btn_reorder, btn_export, btn_drop_name, btn_drop):
+            actions.addWidget(b)
+        actions.addStretch(1)
+        self.root.addLayout(actions)
+
+        format_row = QHBoxLayout()
+        format_row.setSpacing(10)
+        format_row.addWidget(QLabel("章节名格式"))
+        self.mode_cn = QRadioButton("中文")
+        self.mode_num = QRadioButton("数字")
+        self.mode_cn.setChecked(True)
+        self.mode_cn.toggled.connect(self._on_mode)
+        format_row.addWidget(self.mode_cn)
+        format_row.addWidget(self.mode_num)
+        format_row.addSpacing(20)
+        format_row.addWidget(QLabel("分割后文件大小 (KB)"))
+        self.size_spin = QSpinBox()
+        self.size_spin.setRange(1, 10240)
+        self.size_spin.setValue(32)
+        format_row.addWidget(self.size_spin)
+        format_row.addStretch(1)
+        self.root.addLayout(format_row)
+
+        path_row = QHBoxLayout()
+        path_row.setSpacing(8)
+        path_row.addWidget(QLabel("分割后的文件保存位置"))
+        self.out_edit = QLineEdit()
+        self.out_edit.setPlaceholderText("默认与源文件同目录")
+        path_row.addWidget(self.out_edit, 1)
+        pick = IconButton("folder", "选择目录", size=32)
+        pick.clicked.connect(self._pick_dir)
+        path_row.addWidget(pick)
+        self.root.addLayout(path_row)
+
+        foot = QHBoxLayout()
+        foot.setSpacing(8)
+        self.mode_size = QRadioButton("按指定大小分割文件")
+        self.mode_chapter = QRadioButton("按章节分割文件")
+        self.mode_chapter.setChecked(True)
+        foot.addWidget(self.mode_chapter)
+        foot.addWidget(self.mode_size)
+        foot.addStretch(1)
+        cancel = QPushButton("退出")
+        cancel.clicked.connect(self.reject)
+        foot.addWidget(cancel)
+        ok = PrimaryButton("分割")
+        ok.clicked.connect(self._do_split)
+        foot.addWidget(ok)
+        self.root.addLayout(foot)
+
+        self.reload_chapters()
+
+    # ---- 数据
+    def current_pattern(self) -> str:
+        data = self.pattern_combo.currentData()
+        return data if isinstance(data, str) and data else self.pattern_combo.currentText()
+
+    def _sync_pattern_text(self) -> None:
+        pattern = self.pattern_combo.currentData()
+        if isinstance(pattern, str) and pattern:
+            self.pattern_combo.setEditText(pattern)
+            self.pattern_combo.lineEdit().setCursorPosition(0)
+
+    def reload_chapters(self) -> None:
+        self.chapters = chapter_mod.parse_chapters(self.result_text, self.current_pattern())
+        self._fill_table()
+
+    def _update_summary(self) -> None:
+        if not self.chapters:
+            self.chapter_summary.setText("未找到任何章节，请调整下面的“章节名正则表达式”后重新获取。")
+            self.chapter_summary.setStyleSheet(f"color: {Color.warning};")
+        else:
+            chars = sum(c.char_count for c in self.chapters)
+            suspects = sum(1 for c in self.chapters if c.suspect)
+            text = f"章节数：{len(self.chapters)}　共 {chars} 字"
+            if suspects:
+                text += f"　其中 {suspects} 处章号不连续（已标红，请检查）"
+            self.chapter_summary.setText(text)
+            self.chapter_summary.setStyleSheet(f"color: {Color.text_secondary};")
+
+    def _fill_table(self) -> None:
+        self.table.setRowCount(len(self.chapters))
+        for row, ch in enumerate(self.chapters):
+            title_item = QTableWidgetItem(ch.title)
+            if ch.suspect:
+                title_item.setForeground(Qt.GlobalColor.darkRed)
+                title_item.setToolTip("章号与上一章不连续，请检查是否缺章、重复或章节名不规范")
+            self.table.setItem(row, 0, title_item)
+            self.table.setItem(row, 1, QTableWidgetItem(str(ch.char_count)))
+            order_item = QTableWidgetItem(ch.order_text)
+            if ch.suspect:
+                order_item.setForeground(Qt.GlobalColor.darkRed)
+            self.table.setItem(row, 2, order_item)
+        self._update_summary()
+
+    def _selected_rows(self) -> list[int]:
+        return sorted({i.row() for i in self.table.selectedIndexes()})
+
+    def _on_mode(self, cn: bool) -> None:
+        self.title_mode = "cn" if cn else "num"
+
+    # ---- 操作
+    def _normalize_titles(self) -> None:
+        self.result_text, count = chapter_mod.normalize_titles(
+            self.result_text, self.current_pattern(), self.title_mode)
+        self.reload_chapters()
+        QMessageBox.information(self, "规范化章节标题", f"共规范化 {count} 个章节标题。")
+
+    def _reorder(self) -> None:
+        self.result_text, count = chapter_mod.renumber(
+            self.result_text, self.current_pattern(), self.title_mode)
+        self.reload_chapters()
+        QMessageBox.information(self, "重排章节顺序", f"已按列表顺序重新编号 {count} 处。")
+
+    def _remove_names(self) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            return
+        for row in reversed(rows):
+            if 0 <= row < len(self.chapters):
+                ch = self.chapters[row]
+                line_end = self.result_text.find("\n", ch.start)
+                if line_end < 0:
+                    line_end = len(self.result_text)
+                self.result_text = self.result_text[:ch.start] + self.result_text[line_end + 1:]
+        self.reload_chapters()
+
+    def _remove_chapters(self) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            return
+        if QMessageBox.question(self, "删除选定章节",
+                                "将连同章节名与正文一起删除，且不可撤销。继续吗？") != QMessageBox.StandardButton.Yes:
+            return
+        spans = [(self.chapters[r].start, self.chapters[r].end) for r in rows if 0 <= r < len(self.chapters)]
+        for start, end in sorted(spans, reverse=True):
+            self.result_text = self.result_text[:start] + self.result_text[end:]
+        self.reload_chapters()
+
+    def _export_titles(self) -> None:
+        default_dir = self.out_edit.text() or os.path.dirname(self.settings.last_dir or ".")
+        path, _ = QFileDialog.getSaveFileName(self, "导出章节标题列表",
+                                              os.path.join(default_dir, "ChapterList.txt"), "文本文件 (*.txt)")
+        if not path:
+            return
+        content = "\n".join(f"{c.index}\t{c.title}\t{c.char_count}" for c in self.chapters)
+        enc.save_text(path, content + "\n", "utf-8", "\n")
+        QMessageBox.information(self, "导出完成", f"共写入章节名 {len(self.chapters)} 条。")
+
+    def _pick_dir(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "选择分割后的文件所在目录")
+        if path:
+            self.out_edit.setText(path)
+
+    def _do_split(self) -> None:
+        out_dir = self.out_edit.text().strip()
+        if not out_dir:
+            QMessageBox.warning(self, "提示", "请先选择分割后的文件保存位置。")
+            return
+        self.split_requested = {
+            "out_dir": out_dir,
+            "prefix": self.prefix_edit.text().strip(),
+            "by_chapter": self.mode_chapter.isChecked(),
+            "size_kb": self.size_spin.value(),
+            "pattern": self.current_pattern(),
+        }
+        self.accept()
+
+
+# ------------------------------------------------------------------ 合并
+class MergeDialog(BaseDialog):
+    def __init__(self, files: list[str], settings: Settings, parent: QWidget | None = None):
+        super().__init__("文件更名 / 文件合并", parent, 620)
+        self.files = files
+        self.settings = settings
+        self.result: dict | None = None
+
+        self.root.addWidget(SectionLabel("文件合并"))
+        self.root.addWidget(Caption(f"将按列表顺序合并以下 {len(files)} 个文件：" if files else "请先在左侧列表中选择要合并的文件。"))
+
+        self.list = QListWidget()
+        for path in files:
+            item = QListWidgetItem(icons.icon("file", Color.text_secondary, 16), os.path.basename(path))
+            item.setToolTip(path)
+            self.list.addItem(item)
+        self.list.setMaximumHeight(200)
+        self.root.addWidget(self.list)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        grid.addWidget(QLabel("请输入新的文件名"), 0, 0)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("盘符及路径不必输入")
+        grid.addWidget(self.name_edit, 0, 1)
+
+        grid.addWidget(QLabel("合并后的文件保存位置"), 1, 0)
+        dir_row = QWidget()
+        dir_layout = QHBoxLayout(dir_row)
+        dir_layout.setContentsMargins(0, 0, 0, 0)
+        dir_layout.setSpacing(6)
+        self.dir_edit = QLineEdit()
+        if files:
+            self.dir_edit.setText(os.path.dirname(files[0]))
+        dir_layout.addWidget(self.dir_edit, 1)
+        pick = IconButton("folder", "选择目录", size=32)
+        pick.clicked.connect(self._pick_dir)
+        dir_layout.addWidget(pick)
+        grid.addWidget(dir_row, 1, 1)
+        self.root.addLayout(grid)
+
+        self.add_title_check = QCheckBox("添加文件名作为章节名")
+        self.add_title_check.setChecked(True)
+        self.delete_src_check = QCheckBox("合并后删除原文件")
+        self.root.addWidget(self.add_title_check)
+        self.root.addWidget(self.delete_src_check)
+
+        self.mode_row = QWidget()
+        mode_layout = QHBoxLayout(self.mode_row)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.addWidget(QLabel("章节名格式"))
+        self.mode_cn = QRadioButton("中文")
+        self.mode_num = QRadioButton("数字")
+        self.mode_cn.setChecked(True)
+        mode_layout.addWidget(self.mode_cn)
+        mode_layout.addWidget(self.mode_num)
+        mode_layout.addStretch(1)
+        self.root.addWidget(self.mode_row)
+
+        self.add_footer("合并")
+
+    def _pick_dir(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "选择合并后的文件保存位置")
+        if path:
+            self.dir_edit.setText(path)
+
+    def accept(self) -> None:
+        directory = self.dir_edit.text().strip()
+        name = self.name_edit.text().strip()
+        if not directory or not name:
+            QMessageBox.warning(self, "提示", "请填写文件名与保存位置。")
+            return
+        if not name.lower().endswith(".txt"):
+            name += ".txt"
+        self.result = {
+            "out_path": os.path.join(directory, name),
+            "add_title": self.add_title_check.isChecked(),
+            "delete_sources": self.delete_src_check.isChecked(),
+            "mode": "cn" if self.mode_cn.isChecked() else "num",
+        }
+        super().accept()
+
+
+# ------------------------------------------------------------------ 快速审核
+REVIEW_ITEMS = [
+    ("typos", "常见错别字"),
+    ("dedi", "的得地误用"),
+    ("punct", "不规则的标点符号"),
+    ("quotes", "引号不匹配 / 嵌套引号"),
+    ("brackets", "半个括号、括号不匹配"),
+    ("pinyin", "拼音"),
+    ("traditional", "繁体字"),
+    ("longline", "超长段落（疑似缺标点）"),
+]
+
+
+class QuickReviewDialog(BaseDialog):
+    def __init__(self, text: str, parent: QWidget | None = None):
+        super().__init__("快速审核", parent, 760)
+        self.resize(820, 640)
+        self.text = text
+        self.issues: list[checkers.Issue] = []
+        self._all: list[checkers.Issue] = []
+
+        self.root.addWidget(SectionLabel("快速审核"))
+        self.root.addWidget(Caption("勾选要检查的项目，单击“开始检查”。结果按出现顺序列出，双击可定位。"))
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        self._checks: list[tuple[str, QCheckBox]] = []
+        for i, (key, label) in enumerate(REVIEW_ITEMS):
+            cb = QCheckBox(label)
+            cb.setChecked(key in ("typos", "punct", "quotes", "brackets"))
+            grid.addWidget(cb, i % 4, i // 4)
+            self._checks.append((key, cb))
+        self.root.addLayout(grid)
+
+        row = QHBoxLayout()
+        start = PrimaryButton("开始检查", "check")
+        start.clicked.connect(self._run)
+        row.addWidget(start)
+        row.addStretch(1)
+        self.summary = Caption("")
+        row.addWidget(self.summary)
+        self.root.addLayout(row)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["类型", "内容", "建议", "位置"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.doubleClicked.connect(self._goto_issue)
+        self.root.addWidget(self.table, 1)
+
+        closer = QPushButton("关闭")
+        closer.clicked.connect(self.accept)
+        self.root.addWidget(closer, 0, Qt.AlignmentFlag.AlignRight)
+
+    def _run(self) -> None:
+        self._all = []
+        for key, cb in self._checks:
+            if not cb.isChecked():
+                continue
+            try:
+                self._all.extend(checkers.run_checker(key, self.text))
+            except Exception as exc:                    # noqa: BLE001
+                QMessageBox.warning(self, "检查出错", f"{cb.text()}：{exc}")
+        self._all.sort(key=lambda i: i.start)
+        self.table.setRowCount(len(self._all))
+        for row, issue in enumerate(self._all):
+            self.table.setItem(row, 0, QTableWidgetItem(issue.kind))
+            self.table.setItem(row, 1, QTableWidgetItem(issue.text[:60]))
+            self.table.setItem(row, 2, QTableWidgetItem(issue.suggestion))
+            self.table.setItem(row, 3, QTableWidgetItem(str(issue.start)))
+        kinds = len({i.kind for i in self._all})
+        self.summary.setText(f"共找到 {kinds} 类 / {len(self._all)} 处问题" if self._all else "未发现问题。")
+
+    def _goto_issue(self, index) -> None:
+        row = index.row()
+        if 0 <= row < len(self._all):
+            self.selected_offset = self._all[row].start
+            self.accept()
+
+
+# ------------------------------------------------------------------ 转到
+class GotoDialog(BaseDialog):
+    def __init__(self, max_line: int, parent: QWidget | None = None):
+        super().__init__("转到", parent, 380)
+        self.root.addWidget(QLabel("跳转到："))
+        self.line_radio = QRadioButton("行")
+        self.percent_radio = QRadioButton("百分比")
+        self.line_radio.setChecked(True)
+        self.spin = QSpinBox()
+        self.spin.setRange(1, max(1, max_line))
+        self.spin.setValue(1)
+        row = QHBoxLayout()
+        row.addWidget(self.line_radio)
+        row.addWidget(self.spin, 1)
+        self.root.addLayout(row)
+        prow = QHBoxLayout()
+        prow.addWidget(self.percent_radio)
+        self.percent = QSpinBox()
+        self.percent.setRange(0, 100)
+        self.percent.setSuffix(" %")
+        prow.addWidget(self.percent, 1)
+        self.root.addLayout(prow)
+        self.line_radio.toggled.connect(lambda on: (self.spin.setEnabled(on), self.percent.setEnabled(not on),
+                                                    self.percent.setValue(0)))
+        self.percent.setEnabled(False)
+        self.add_footer()
+
+    def value(self) -> tuple[str, int]:
+        return ("line", self.spin.value()) if self.line_radio.isChecked() else ("percent", self.percent.value())
+
+
+# ------------------------------------------------------------------ 重编码
+class RecodeDialog(BaseDialog):
+    def __init__(self, current: str, parent: QWidget | None = None):
+        super().__init__("重编码", parent, 420)
+        self.root.addWidget(QLabel("目标编码："))
+        self.combo = QComboBox()
+        for label, codec in enc.ENCODINGS:
+            self.combo.addItem(label, codec)
+        self.combo.setMinimumHeight(32)
+        index = self.combo.findData(current)
+        if index >= 0:
+            self.combo.setCurrentIndex(index)
+        self.root.addWidget(self.combo)
+
+        self.root.addWidget(QLabel("行尾格式："))
+        self.newline = QComboBox()
+        self.newline.addItem("DOS/Windows (CRLF)", "\r\n")
+        self.newline.addItem("Unix (LF)", "\n")
+        self.newline.addItem("Mac (CR)", "\r")
+        self.newline.setMinimumHeight(32)
+        self.root.addWidget(self.newline)
+        self.add_footer()
+
+    def target(self) -> tuple[str, str]:
+        return self.combo.currentData(), self.newline.currentData()
+
+
+# ------------------------------------------------------------------ 关于
+ABOUT_TEXT = f"""
+<h2 style="margin-bottom:2px;">{APP_NAME} <span style="color:{ACCENT};">{APP_VERSION}</span></h2>
+<p style="color:#666;margin-top:0;">{APP_SUBTITLE}</p>
+
+<p>面向中文长文本（小说、讲稿、转录稿）的批量整理工具。全部功能在本地完成，不上传任何内容。</p>
+
+<p><b>主要功能</b></p>
+<ul>
+<li>格式整理：行尾清理、标点全半角、硬回车合并、行首缩进、广告清理、屏蔽码与拼音还原</li>
+<li>正则查找替换：80 余条内置表达式 + 你的 custreg.txt，支持自定义扩充</li>
+<li>章节整理：章节名规范化、重排编号、按章节或大小分割、多文件合并</li>
+<li>快速审核：错别字、的得地、引号括号、不规则标点、繁体字、超长段落</li>
+<li>格式转换：HTML / EPUB / DOCX / PDB / MOBI / JAR / CHM / RTF → TXT，编码互转，简繁转换</li>
+</ul>
+
+<p><b>快捷键</b><br>
+Ctrl+O 打开　Ctrl+S 保存　Ctrl+Shift+S 另存为　Ctrl+F 查找<br>
+F3 查找下一个　Shift+F3 查找上一个　Ctrl+G 转到<br>
+Ctrl+D 格式整理　Ctrl+Shift+F 快速审核　Ctrl+Shift+A 广告检查<br>
+Tab / Shift+Tab 缩进 / 反缩进　Ctrl+= / Ctrl+- 缩放字号</p>
+
+<p style="color:#888;font-size:11px;">本程序参照原 txtFormat 文本校对 V2.10 重写：界面与代码结构完全重构，
+处理逻辑与内置规则依据原程序说明文档与其内置表达式表还原。<br>{COPYRIGHT}　保留所有权利。</p>
+"""
+
+
+class AboutDialog(BaseDialog):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__("关于 " + APP_NAME, parent, 640)
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(False)          # 不打开外部程序
+        browser.setHtml(ABOUT_TEXT)
+        browser.setStyleSheet(f"background: {Color.card}; border: 1px solid {Color.border};"
+                              f"border-radius: 8px; padding: 14px;")
+        browser.setMinimumHeight(400)
+        self.root.addWidget(browser)
+
+        # ---- 联系方式：点击即复制，不跳转、不调用邮件客户端
+        box = QFrame()
+        box.setObjectName("ContactBox")
+        box.setStyleSheet(f"#ContactBox {{ background: {Color.card_alt};"
+                          f"border-radius: 8px; }}")
+        row = QHBoxLayout(box)
+        row.setContentsMargins(14, 9, 14, 9)
+        row.setSpacing(10)
+        who = QLabel(f"作者  {AUTHOR}")
+        who.setStyleSheet(f"color: {Color.text_secondary}; font-size: 12px;")
+        row.addWidget(who)
+        self.chip = CopyChip(AUTHOR_EMAIL, hint="点击复制邮箱")
+        row.addWidget(self.chip)
+        self.hint = Caption("点击即可复制")
+        self.hint.setStyleSheet(f"color: {Color.text_tertiary}; font-size: 11px;")
+        row.addWidget(self.hint)
+        row.addStretch(1)
+        self.root.addWidget(box)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        copy_btn = CommandButton("复制邮箱", "copy")
+        copy_btn.setToolTip(f"把 {AUTHOR_EMAIL} 复制到剪贴板")
+        copy_btn.clicked.connect(self._copy)
+        footer.addWidget(copy_btn)
+        close_btn = PrimaryButton("关闭")
+        close_btn.setDefault(True)
+        close_btn.clicked.connect(self.accept)
+        footer.addWidget(close_btn)
+        self.root.addLayout(footer)
+
+    def _copy(self) -> None:
+        self.chip.copy()
+        # 只弹一个提示气泡，邮箱与说明文字保持不变
+        QToolTip.showText(self.chip.mapToGlobal(self.chip.rect().bottomLeft()),
+                          f"已复制 {AUTHOR_EMAIL}", self.chip)
+
+
+__all__ = ["OptionsDialog", "SplitDialog", "MergeDialog", "QuickReviewDialog",
+           "GotoDialog", "RecodeDialog", "AboutDialog", "BaseDialog", "REVIEW_ITEMS"]

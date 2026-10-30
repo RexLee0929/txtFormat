@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <Import Project="..\version.props" />
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>txtFormat-Setup</AssemblyName>
+    <RootNamespace>TxtFormatSetup</RootNamespace>
+    <DebugType>none</DebugType>
+    <Deterministic>true</Deterministic>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- payload.zip 由 tools/make_payload.py 生成，内嵌进安装器 -->
+    <Resource Include="app.ico" />
+    <EmbeddedResource Include="payload.zip" LogicalName="payload.zip" Condition="Exists('payload.zip')" />
+    <EmbeddedResource Include="..\..\LICENSE" LogicalName="LICENSE" Condition="Exists('..\..\LICENSE')" />
+    <EmbeddedResource Include="..\..\README.md" LogicalName="README" Condition="Exists('..\..\README.md')" />
+    <EmbeddedResource Include="..\..\custreg.txt" LogicalName="CUSTREG" Condition="Exists('..\..\custreg.txt')" />
+  </ItemGroup>
+
+</Project>
