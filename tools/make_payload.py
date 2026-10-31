@@ -15,8 +15,8 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -41,7 +41,23 @@ def wanted(path: Path) -> bool:
     return True
 
 
-def build(src: Path, dst: Path) -> int:
+def newest_source() -> tuple[float, str]:
+    """程序本体源码里最新的修改时间（app/**/*.py + spec + requirements）。"""
+    newest, who = 0.0, ""
+    targets = [ROOT / "txtFormat.spec", ROOT / "requirements.txt"]
+    app_dir = ROOT / "app"
+    if app_dir.is_dir():
+        targets.extend(app_dir.rglob("*.py"))
+    for item in targets:
+        if not item.is_file():
+            continue
+        mtime = item.stat().st_mtime
+        if mtime > newest:
+            newest, who = mtime, str(item.relative_to(ROOT))
+    return newest, who
+
+
+def build(src: Path, dst: Path, allow_stale: bool = False) -> int:
     if not src.is_dir():
         print(f"[错误] 找不到主程序产物目录：{src}")
         print("       请先运行 build.cmd（或 python -m PyInstaller txtFormat.spec）")
@@ -55,6 +71,18 @@ def build(src: Path, dst: Path) -> int:
     exe = src / "txtFormat.exe"
     if not exe.is_file():
         print(f"[错误] 缺少主程序：{exe}")
+        return 1
+
+    # 防呆：exe 比源码旧就说明没重新打包 —— 这一步以前是静默的，
+    # 结果安装包里塞的是旧代码，界面上改过的 bug 一个都没生效（实打实踩过）。
+    src_mtime, who = newest_source()
+    exe_mtime = exe.stat().st_mtime
+    if not allow_stale and src_mtime > exe_mtime + 0.5:
+        print("[错误] 主程序产物比源码旧，安装包会带上旧代码：")
+        print(f"       源码 {who} 改于 {time.strftime('%m-%d %H:%M', time.localtime(src_mtime))}")
+        print(f"       {exe} 生成于 {time.strftime('%m-%d %H:%M', time.localtime(exe_mtime))}")
+        print("       请先运行 build.cmd 重新打包程序本体，再生成安装包。")
+        print("       （确认要用旧产物时加 --allow-stale）")
         return 1
 
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -82,8 +110,10 @@ def main() -> int:
                     help="PyInstaller 产物目录（默认 artifacts/txtFormat）")
     ap.add_argument("--dst", default=str(ROOT / "installer" / "winforms" / "payload.zip"),
                     help="输出的 zip 路径")
+    ap.add_argument("--allow-stale", action="store_true",
+                    help="主程序产物比源码旧时仍继续（仅用于确认过的特殊场景）")
     args = ap.parse_args()
-    return build(Path(args.src).resolve(), Path(args.dst).resolve())
+    return build(Path(args.src).resolve(), Path(args.dst).resolve(), args.allow_stale)
 
 
 if __name__ == "__main__":

@@ -44,11 +44,12 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-# ---- 精简：去掉用不到的 Qt 组件（软件 OpenGL、网络模块、多语言翻译、多余插件）
+# ---- 精简：去掉用不到的 Qt 组件（软件 OpenGL、多语言翻译、多余插件）
+# 注意：QtNetwork 不能删 —— 单实例互斥用 QLocalServer/QLocalSocket（规范 §七.6），
+# 删掉 Qt6Network.dll 后 frozen 版会在 import 阶段直接失败（弹「Failed to execute
+# script」且无人应答就挂住，实测踩过）。
 DROP_FILES = {
     "PySide6/opengl32sw.dll",       # 软件 OpenGL 兜底，纯控件渲染用不到（19 MB）
-    "PySide6/Qt6Network.dll",
-    "PySide6/QtNetwork.pyd",
     "PySide6/plugins/platforms/qoffscreen.dll",
     "PySide6/plugins/platforms/qminimal.dll",
     "PySide6/plugins/platforms/qdirect2d.dll",

@@ -15,8 +15,16 @@ namespace TxtFormatSetup
                   PageDir = 3, PageTasks = 4, PageReady = 5;
 
         int _page;
-        bool _busy, _done, _failed, _blocked, _dirTouched;
+        bool _busy, _done, _failed, _blocked;
         string _blockedPath;      // 被占用的那个文件，用于在页面上指名道姓
+        string _blockError;       // 结束进程失败时的页内警示（规范 §二.1：不弹窗）
+
+        /// <summary>安装目录从哪来：默认值 / 已装版本 / 用户手改。
+        /// 只有「用户手改过」才不许切模式时自动重算目录 —— 提权后选了「为所有用户安装」
+        /// 却还装着旧的当前用户目录，就是这么来的（见 PickMode）。</summary>
+        enum DirSource { Default, Installed, User }
+
+        DirSource _dirSource = DirSource.Default;
 
         string _dir;
         InstallMode _mode = Program.Mode;
@@ -29,23 +37,40 @@ namespace TxtFormatSetup
         CheckBox _cbDesktop, _cbStart, _cbRun;
         ProgressStrip _bar;
         Label _status;
-        CheckBox _cbRunNow, _cbReadme;
+        CheckBox _cbRunNow;
         Label _localExe, _localCfg;   // 「选择安装位置」页的本地状态行，没有就整块不出现
+        Label _localCfgPath;          // 上面那份配置的完整地址，单独一行（过长省略号）
+        Label _otherInstall;          // 本机装在**别处**的那一份（换了安装模式时出现）
+        Label _otherHint;             // 上面那行怎么处理的建议
+        Label _dirError;              // 路径非法时的页内警示（规范 §二.1：不弹窗）
         CheckBox _cbOverwrite;
+
+        /// <summary>提权重启后从 --resume 指定的页接着走，只跳一次。</summary>
+        bool _resumed;
 
         public InstallForm()
             : base(Program.AppName + " 安装", 640, 400, Program.Tagline)
         {
             _mode = Program.Mode;
+
+            // 已装过就默认装在原位置（覆盖升级 / 修复），没装过就按模式给默认目录。
+            // 但「已装的是当前用户 → 这次提权改成所有用户」不能沿用：那会把机器级安装
+            // 塞进 %LOCALAPPDATA%，跟用户刚选的模式自相矛盾。三套安装器用同一套判定，
+            // 位置不一致时由位置页的「本机已安装过」提示把旧的那份说出来（见 _otherInstall）。
             var installed = Program.InstalledDir();
-            if (!string.IsNullOrEmpty(installed))
+            bool installedIsMachine = !string.IsNullOrEmpty(installed)
+                                      && Program.IsUnderProgramFiles(installed);
+            bool wantMachine = Program.Mode == InstallMode.AllUsers;
+
+            if (!string.IsNullOrEmpty(installed) && installedIsMachine == wantMachine)
             {
                 _dir = installed;
-                _dirTouched = true;
+                _dirSource = DirSource.Installed;
             }
             else
             {
                 _dir = Program.DefaultDir(_mode);
+                _dirSource = DirSource.Default;
             }
         }
 
@@ -56,14 +81,24 @@ namespace TxtFormatSetup
             Back.Click += delegate { OnBack(); };
             CancelBtn.Click += delegate
             {
-                if (_failed) { RetryInstall(); return; }   // 失败页这一格是「重试」
-                if (!_busy) Close();
+                if (!_busy) Close();     // 失败页主按钮位是「重试」，这一格就是「关闭」
             };
         }
 
         // ------------------------------------------------------------ 页签
         protected override void ShowPage(int index)
         {
+            // 提权重启后接着走（Program.ResumePage 由 --resume=N 传入）：
+            // 用户刚在上一实例里选完模式，不该再从欢迎页重新点一遍。
+            if (!_resumed && index == 0 && Program.ResumePage > 0)
+            {
+                _resumed = true;
+                int target = Program.ResumePage;
+                Program.ResumePage = 0;   // 只跳一次，之后「上一步」还能正常回到欢迎页
+                ShowPage(target);
+                return;
+            }
+
             _page = index;
             _blocked = false;
             Body.Controls.Clear();
@@ -125,26 +160,35 @@ namespace TxtFormatSetup
 
         void PickMode(InstallMode m)
         {
+            // 只有「真的换了模式」才重算路径：页面初始化时也会调到这里，
+            // 若无条件重算，覆盖升级场景下已装目录会被立刻换成默认目录。
+            bool switched = m != _mode;
             _mode = m;
 
             if (_cardUser != null) { _cardUser.Selected = m == InstallMode.PerUser; _cardUser.Invalidate(); }
             if (_cardAll != null) { _cardAll.Selected = m == InstallMode.AllUsers; _cardAll.Invalidate(); }
 
-            if (!_dirTouched) _dir = Program.DefaultDir(m);
-
-            if (_modeHint != null)
+            // 用户手改过的目录不跟着模式跑；其余情况切模式就换成该模式的默认目录 ——
+            // 否则「为所有用户安装」会带着旧的当前用户目录（%LOCALAPPDATA%），
+            // 提权后从许可页退回来时尤其明显。
+            if (switched && _dirSource != DirSource.User)
             {
-                _modeHint.Text = _dirTouched
-                    ? "安装位置已在后面单独设置。"
-                    : "将安装到：" + Program.DefaultDir(m);
+                _dir = Program.DefaultDir(m);
+                _dirSource = DirSource.Default;
             }
+
+            // 卡片下方永远是「将安装到：<当前解析出来的真实路径>」，切卡片实时变化
+            // （规范 §三）—— 不许写成"安装位置已在后面单独设置"这种没有信息的提示。
+            if (_modeHint != null) _modeHint.Text = "将安装到：" + _dir;
         }
 
         void BuildLicense()
         {
             TitleLabel.Text = "许可协议";
 
-            L("请阅读以下许可协议。安装前必须接受本协议的条款。", 0, 0, 428, 20);
+            // 措辞要对得上交互：页面没有「我接受」勾选，别写「必须接受」却没有任何
+            // 接受动作（cc 同款：点「下一步」继续安装即视为同意）。
+            L("请阅读以下许可协议。点「下一步」继续安装，即表示你同意这些条款。", 0, 0, 428, 20);
 
             var tb = new TextBox
             {
@@ -160,6 +204,18 @@ namespace TxtFormatSetup
                 WordWrap = true
             };
             Body.Controls.Add(tb);
+
+            // 只读协议不是输入框：不占 Tab 序，也不该拿首焦点。
+            // 它是 Body 里第一个可选控件，WinForms 进页就把首焦点给它；
+            // 而原生 EDIT 控件一拿到焦点就 SelectAll —— 整页协议变成一片蓝底，
+            // 看着像「被选中、准备复制」，用户第一反应就是「怎么全选了」。
+            // GotFocus 里再清一次是兜底：万一将来有人给它 TabStop 或程序化 Focus，
+            // 也不会带着全选出来（鼠标点进来时定位插入符本就落在点击处，不受影响）。
+            tb.TabStop = false;
+            tb.GotFocus += delegate { tb.Select(0, 0); };
+
+            // 焦点交给主按钮：回车即继续，和「点下一步即同意」的措辞一致
+            ActiveControl = NextBtn;
         }
 
         void BuildDir()
@@ -184,22 +240,99 @@ namespace TxtFormatSetup
                     ? trimmed
                     : Path.Combine(trimmed, Program.AppId);
 
-                _dirTouched = true;
+                _dirSource = DirSource.User;   // 用户自己挑的位置，之后切模式不再自动改
                 _dirBox.Text = full;
-                RefreshLocalState();       // 换了目录要重新判定
+                ValidateDir(false);       // 换了目录：路径合法性与本地状态都要重新判定
             };
 
             L(SizeText(), 0, 84, 428, 20);
 
+            // ---- 路径非法 / 不可写 / 空间不够：页内一行警示色文字，不弹窗（规范 §二.1）
+            // 位置与 cc / ClipSync 一致：压在本地区块上方，出现时下面的内容整体让位。
+            _dirError = L("", 0, 104, 428, 20);
+            _dirError.ForeColor = Theme.Warn;
+            _dirError.Visible = false;
+
             // ---- 本地状态：没有就整块不出现（规范 §三.2）
-            _localExe = L("", 0, 118, 428, 20);
-            _localCfg = L("", 0, 142, 428, 20);
-            _cbOverwrite = Check("覆盖现有配置（恢复为默认设置）", 0, 166, 380, false);
+            _localExe = L("", 0, 128, 428, 20);
+            _localCfg = L("", 0, 152, 428, 20);
+            // 配置文件的具体地址单独一行：只说「有配置」用户不知道动的是哪一份，
+            // 长路径用省略号，别让它把右边的复选框挤下去。
+            _localCfgPath = L("", 0, 174, 428, 18);
+            _localCfgPath.ForeColor = Theme.Dim;
+            _localCfgPath.AutoEllipsis = true;
+            // 「本机装在别处」两行：目标目录没有程序、但注册表里记着另一份时出现
+            _otherInstall = L("", 0, 196, 428, 20);
+            _otherInstall.ForeColor = Theme.Dim;
+            _otherInstall.AutoEllipsis = true;
+            _otherHint = L("", 0, 218, 428, 20);
+            _otherHint.ForeColor = Theme.Dim;
+            _cbOverwrite = Check("覆盖现有配置（恢复为默认设置）", 0, 242, 380, false);
             _cbOverwrite.CheckedChanged += delegate { _overwriteConfig = _cbOverwrite.Checked; };
 
             // 手动输入、粘路径、浏览选完都要跟着刷新
-            _dirBox.TextChanged += delegate { RefreshLocalState(); };
-            RefreshLocalState();
+            _dirBox.TextChanged += delegate { ValidateDir(false); };
+            // 进页面就检查一次：先判路径合法性（决定警示行是否出现），
+            // 再由 ValidateDir 里的 ShowDirError 排本地状态区。
+            ValidateDir(false);
+        }
+
+        /// <summary>
+        /// 路径可用性 = 页内一行警示 + 主按钮置灰，不弹系统消息框（规范 §二.1）。
+        /// <paramref name="probe"/> 为真才建目录试探可写性 —— 边打字边建会在用户取消时
+        /// 留下一串空目录，所以实时校验只做格式检查与空间检查（QuickCheckDir / CheckSpace）。
+        /// </summary>
+        /// <returns>通过返回 true。</returns>
+        bool ValidateDir(bool probe)
+        {
+            var dir = _dirBox == null ? _dir : _dirBox.Text.Trim();
+            string err = probe ? CheckDir(dir) : QuickCheckDir(dir);
+            // 空间不够也走页内提示（规范 §二.1 列举的三类：路径非法、权限不足、空间不够）。
+            // CheckSpace 只读 DriveInfo、不建目录，实时校验也安全。
+            if (err == null && dir.Length > 0) err = CheckSpace(dir);
+            ShowDirError(err);
+            return err == null;
+        }
+
+        /// <summary>页内警示行：显示 err 并把主按钮置灰；传 null 清除。本地状态区跟着让位。</summary>
+        void ShowDirError(string err)
+        {
+            if (_dirError == null) return;
+
+            _dirError.Visible = err != null;
+            _dirError.Text = err ?? "";
+            if (err != null)
+            {
+                // 警示文案可能折到两三行 —— 按真实需要长高，下面那块本地状态跟着挪，
+                // 不能让 20px 的固定行高把第二行裁掉，也不能压住「检测到本地已有配置」。
+                int need = TextRenderer.MeasureText(err, _dirError.Font,
+                    new Size(_dirError.Width, 0), TextFormatFlags.WordBreak).Height;
+                _dirError.Height = Math.Max(20, need);
+            }
+
+            if (NextBtn != null) NextBtn.Enabled = err == null;
+            RefreshLocalState();       // 警示行出现/消失时，本地状态区重新排位
+        }
+
+        /// <summary>便宜检查：边打字边跑也毫无副作用（不建目录、不写文件）。</summary>
+        static string QuickCheckDir(string dir)
+        {
+            if (string.IsNullOrEmpty(dir)) return "请填写安装位置。";
+            if (!Path.IsPathRooted(dir))
+                return "安装位置要写完整路径，例如：\nD:\\Apps\\txtFormat";
+
+            try
+            {
+                var full = Path.GetFullPath(dir);
+                if (dir.IndexOfAny(Path.GetInvalidPathChars()) >= 0)
+                    return "路径里有不能用的字符，请换一个位置。";
+                if (!Path.IsPathRooted(full)) return "安装位置要写完整路径。";
+            }
+            catch
+            {
+                return "这个路径写不成文件系统的路径，请检查一下。";
+            }
+            return null;
         }
 
         /// <summary>已装版本 → 一行结论文案。降级必须说清楚，别让用户默默退回旧版。</summary>
@@ -224,7 +357,8 @@ namespace TxtFormatSetup
         }
 
         /// <summary>
-        /// 按当前路径刷新「本地状态」区：有已装程序 / 有配置才显示，都没有就整块隐藏。
+        /// 按当前路径刷新「本地状态」区：本目录已装 / 本目录有配置 / 别处装过 才显示，
+        /// 都没有就整块隐藏，不留空行（规范 §三.2）。
         /// 切到没有配置的目录时，复选框要连勾选状态一起复位，不能把上一个目录的选择带过去。
         /// </summary>
         void RefreshLocalState()
@@ -254,19 +388,63 @@ namespace TxtFormatSetup
             _localCfg.Visible = hasCfg;
             _localCfg.Text = hasCfg ? "检测到本地已有配置，将保留你现有的设置。" : "";
 
+            // 哪几份配置在目录里就列哪几份的完整地址（设置 + 自定义正则）
+            _localCfgPath.Visible = hasCfg;
+            _localCfgPath.Text = hasCfg ? ExistingConfigPaths(dir) : "";
+
             _cbOverwrite.Visible = hasCfg;
             _cbOverwrite.Enabled = hasCfg;
             if (!hasCfg) _cbOverwrite.Checked = false;   // 没配置就不可能覆盖
             _overwriteConfig = _cbOverwrite.Checked;
 
-            // 依次紧凑排布，没有的那块不占位
-            int y = 118;
+            // 目标目录本身没有程序、但本机别处装着一份（多半是这次换了安装模式）：
+            // 必须说出来，否则页面看着跟首次安装一模一样（用户实测踩过）。
+            string other = hasExe ? null : Program.OtherInstalledDir(dir);
+            _otherInstall.Visible = other != null;
+            _otherHint.Visible = other != null;
+            if (other != null)
+            {
+                string otherVer;
+                Program.DetectUpgrade(other, out otherVer);
+                _otherInstall.Text = "本机已安装过"
+                    + (string.IsNullOrEmpty(otherVer) ? "" : "（v" + otherVer + "）") + "：" + other;
+                _otherHint.Text = "本次会装到当前位置，两处同时存在；要升级那一份，请改回原来的安装模式。";
+            }
+
+            // 依次紧凑排布，没有的那块不占位。
+            // 起点跟着警示行走：警示行折成两三行时往下让位，不折行就停在固定位置。
+            int y = _dirError != null && _dirError.Visible ? _dirError.Bottom + 8 : 128;
             if (hasExe) { _localExe.Location = P(0, y); y += 24; }
+            if (other != null)
+            {
+                _otherInstall.Location = P(0, y);
+                _otherHint.Location = P(0, y + 22);
+                y += 44;
+            }
             if (hasCfg)
             {
                 _localCfg.Location = P(0, y);
-                _cbOverwrite.Location = P(0, y + 24);
+                _localCfgPath.Location = P(0, y + 22);
+                _cbOverwrite.Location = P(0, y + 46);
+                // 复选框提到最前：它是可操作项，绝不能被上面的文字标签盖住
+                _cbOverwrite.BringToFront();
             }
+        }
+
+        /// <summary>目标目录里实际存在的配置文件完整路径（设置 + 自定义正则，按存在与否拼接）。</summary>
+        static string ExistingConfigPaths(string dir)
+        {
+            try
+            {
+                var settings = Program.SettingsPathIn(dir);
+                var custReg = Program.ConfigPathIn(dir);
+                bool a = File.Exists(settings), b = File.Exists(custReg);
+                if (a && b) return settings + "、" + custReg;
+                if (a) return settings;
+                if (b) return custReg;
+                return "";
+            }
+            catch { return ""; }
         }
 
         static string SizeText()
@@ -293,6 +471,50 @@ namespace TxtFormatSetup
             return "所需磁盘空间：约 65 MB";
         }
 
+        /// <summary>安装包解压后的总字节数（用来跟目标盘剩余空间比）。</summary>
+        static long PayloadBytes()
+        {
+            try
+            {
+                using (var s = typeof(Program).Assembly.GetManifestResourceStream("payload.zip"))
+                {
+                    if (s == null) return 0;
+                    using (var zip = new System.IO.Compression.ZipArchive(
+                               s, System.IO.Compression.ZipArchiveMode.Read))
+                    {
+                        long total = 0;
+                        foreach (var e in zip.Entries) total += e.Length;
+                        return total;
+                    }
+                }
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>
+        /// 目标盘剩余空间够不够（规范 §二.1 明确要求「空间不够」做页内提示）。
+        /// 返回 null 表示够用或测不出来（测不出来不该拦住用户）。
+        /// </summary>
+        static string CheckSpace(string dir)
+        {
+            long need = PayloadBytes();
+            if (need <= 0) return null;
+            try
+            {
+                var root = Path.GetPathRoot(Path.GetFullPath(dir));
+                if (string.IsNullOrEmpty(root)) return null;
+                var drive = new DriveInfo(root);
+                if (!drive.IsReady) return null;
+                // 留 50MB 余量，别把盘占得一丝不剩
+                if (drive.AvailableFreeSpace >= need + 50L * 1048576L) return null;
+                double needMb = need / 1048576.0;
+                double freeMb = drive.AvailableFreeSpace / 1048576.0;
+                return string.Format("目标盘剩余空间不足（需要约 {0:0} MB，仅剩 {1:0} MB）。请换一个磁盘或先清理空间。",
+                                     needMb, freeMb);
+            }
+            catch { return null; }
+        }
+
         void BuildTasks()
         {
             TitleLabel.Text = "选择附加任务";
@@ -311,46 +533,34 @@ namespace TxtFormatSetup
         {
             TitleLabel.Text = "准备安装";
 
-            // Body 区只有 264px 高，最多要放 5 段（模式/位置/操作类型/本地配置/附加任务），
-            // 所以导语压成一行、每段步进 42px，别用宽松行距，否则最后一段会被分隔线裁掉。
             L("点「安装」开始安装，或点「上一步」复查或更改设置。", 0, 0, 428, 20);
 
-            int y = 26;
-            const int Step = 42;
-
-            Strong("安装模式：", 0, y, 428, 20);
-            L(_mode == InstallMode.AllUsers
+            // 左标签右值两列：标签右对齐成一列（88px），值从 x=96 起自动折行。
+            // 比原来「标签一行、值一行」省掉近一半竖向空间，六行也放得下。
+            int y = 30;
+            y += Row("安装模式", _mode == InstallMode.AllUsers
                 ? "为所有用户安装（写入 Program Files，需要管理员权限）"
-                : "仅为我安装（写入当前用户目录）", 0, y + 18, 428, 18);
-            y += Step;
+                : "仅为我安装（写入当前用户目录）", y) + 8;
 
-            Strong("安装位置：", 0, y, 428, 20);
-            L(_dir, 0, y + 18, 428, 18);
-            y += Step;
+            y += Row("安装位置", _dir, y) + 8;
 
             // 已装过就说明这次是更新 / 重装 / 降级（规范 §三.3）
             string installed;
             var kind = Program.DetectUpgrade(_dir, out installed);
             if (kind != Program.UpgradeKind.Fresh)
             {
-                Strong("操作类型：", 0, y, 428, 20);
-                var lbl = L(ActionText(kind, installed), 0, y + 18, 428, 18);
-                if (kind == Program.UpgradeKind.Downgrade) lbl.ForeColor = Theme.Warn;
-                y += Step;
+                y += Row("操作类型", ActionText(kind, installed), y,
+                         kind == Program.UpgradeKind.Downgrade ? Theme.Warn : Theme.Ink) + 8;
             }
 
             // 只在目标目录确实有配置时才出现（规范 §三.2：没有就不占位）
             if (Program.HasConfig(_dir))
             {
-                Strong("本地配置：", 0, y, 428, 20);
-                L(_overwriteConfig
-                    ? "覆盖（恢复为默认设置）"
-                    : "保留现有配置", 0, y + 18, 428, 18);
-                y += Step;
+                y += Row("本地配置",
+                         _overwriteConfig ? "覆盖（恢复为默认设置）" : "保留现有配置", y) + 8;
             }
 
-            Strong("附加任务：", 0, y, 428, 20);
-            L(TaskSummary(), 0, y + 18, 428, 44);
+            Row("附加任务", TaskSummary(), y);
         }
 
         /// <summary>「准备安装」页的操作类型文案，比页面提示更短。</summary>
@@ -403,13 +613,12 @@ namespace TxtFormatSetup
             if (_done)
             {
                 if (_cbRunNow != null && _cbRunNow.Checked) Program.Launch(_dir);
-                if (_cbReadme != null && _cbReadme.Checked) Program.OpenReadme(_dir);
                 Close();
                 return;
             }
 
             if (_blocked) { EndRunningAndRetry(); return; }
-            if (_failed) { Close(); return; }
+            if (_failed) { RetryInstall(); return; }   // 主按钮位：重试（规范 §二：主按钮在左）
             if (_busy) return;
 
             switch (_page)
@@ -418,17 +627,22 @@ namespace TxtFormatSetup
                     {
                         if (_mode == InstallMode.AllUsers && !Program.IsElevated)
                         {
-                            var r = MessageBox.Show(this,
-                                "「为所有用户安装」需要管理员权限。\n\n"
-                                + "接下来会请求提升权限并重新启动安装程序，你的选择会被保留。",
-                                Program.AppName, MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
-                            if (r != DialogResult.OK) return;
+                            // 规范 §二.1：提权确认属于「只能弹」的场景 →
+                            // 自绘对话框（不发声、无系统图标）。标题**用程序名**，
+                            // 正文格式与 cc 同款（第一句说事 + 空行 + 下一步会发生什么）。
+                            if (!MsgDialog.Ask(this,
+                                    "「为所有用户安装」需要管理员权限。\r\n\r\n"
+                                    + "接下来会请求提升权限并重新启动安装程序，"
+                                    + "你的选择会被保留。",
+                                    "继续", "取消"))
+                                return;
 
-                            if (Program.RelaunchAsAdmin("--all-users")) { Close(); return; }
+                            // 权限提升后重启，并告诉新实例跳到「许可协议」页（--resume=2），
+                            // 不用从欢迎页重新点一遍（与 cc 同款）。
+                            if (Program.RelaunchAsAdmin("--all-users --resume=" + PageLicense)) { Close(); return; }
 
-                            MessageBox.Show(this,
-                                "没有获得管理员权限，已取消。\n可以改选「仅为我安装」，不需要提权。",
-                                Program.AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            MsgDialog.Info(this,
+                                "没有获得管理员权限，已取消。\r\n可以改选「仅为我安装」，不需要提权。");
                             return;
                         }
                         ShowPage(PageLicense);
@@ -436,15 +650,11 @@ namespace TxtFormatSetup
                     }
                 case PageDir:
                     {
-                        var err = CheckDir(_dirBox.Text.Trim());
-                        if (err != null)
-                        {
-                            MessageBox.Show(this, err, Program.AppName,
-                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                            return;
-                        }
+                        // 点「下一步」才真的建目录试探可写性；实时校验只查格式与空间。
+                        // 不合规就停在页内：警示行 +「下一步」置灰，不弹系统消息框（规范 §二.1）
+                        if (!ValidateDir(true)) return;
                         _dir = _dirBox.Text.Trim();
-                        _dirTouched = true;
+                        _dirSource = DirSource.User;
                         // 「该位置已存在、是否覆盖」的弹窗已移除（规范 §一 / §三.2）：
                         // 版本结论与配置保留与否都做在页面上，下一页汇总再确认一次。
                         ShowPage(PageTasks);
@@ -516,6 +726,7 @@ namespace TxtFormatSetup
             _busy = true;
             _blocked = false;
             _blockedPath = null;
+            _blockError = null;            // 新一轮安装不带上一轮的旧警示
             Body.Controls.Clear();
             TitleLabel.Text = "正在安装";
             Back.Visible = false;
@@ -551,14 +762,19 @@ namespace TxtFormatSetup
                 }
                 catch (Exception ex)
                 {
-                    // 文件被占用 → 转成可操作的「正在运行」页，而不是一句错误把用户晾在那
+                    // 文件被占用 → 转成可操作的「正在运行」页，而不是一句错误把用户晾在那。
+                    // DoInstall 开头的复查抛 StillRunningException（规范 §三.1-7）也算这一类：
+                    // 得按异常类型认，不能只靠 RunningInstances 二次探测 —— 那个进程可能
+                    // 恰好在这几毫秒里退出了，否则会拿着一句英文默认 message 走失败页。
                     var msg = ex.Message;
                     var path = Program.QuotedPath(msg);
+                    bool running = ex is Program.StillRunningException
+                        || Program.LooksLikeFileInUse(msg)
+                        || (File.Exists(Program.ExePathIn(dir))
+                            && Program.RunningInstances(dir).Length > 0);
                     Ui(delegate
                     {
-                        if (Program.LooksLikeFileInUse(msg)
-                            || (File.Exists(Program.ExePathIn(_dir))
-                                && Program.RunningInstances(_dir).Length > 0))
+                        if (running)
                         {
                             NextBtn.Text = "结束进程并继续";
                             ShowBlocked(path ?? Program.ExePathIn(_dir));
@@ -581,7 +797,10 @@ namespace TxtFormatSetup
             Body.Controls.Clear();
             TitleLabel.Text = "安装未完成";
             Back.Visible = false;
-            NextBtn.Text = "关闭";
+
+            // 主按钮位（左）放「重试」，最右是「关闭」——规范 §二：主按钮在左、取消最右。
+            // 这里的主操作是重试，不是关掉重来，别把两者位置弄反。
+            NextBtn.Text = "重试";
             NextBtn.Enabled = true;
 
             L("安装过程中出错：\n\n" + msg + "\n\n"
@@ -589,18 +808,23 @@ namespace TxtFormatSetup
               + "或点「关闭」退出后重新运行安装程序。",
               0, 0, 428, 140);
 
-            // 失败页给一个「重试」：把上一步/取消的位置复用成一个重试按钮
             CancelBtn.Visible = true;
             CancelBtn.Enabled = true;
-            CancelBtn.Text = "重试";
+            CancelBtn.Text = "关闭";
         }
 
-        /// <summary>失败页的「重试」：关掉可能还在运行的实例，重新走一遍安装。</summary>
+        /// <summary>失败页的「重试」：重新走一遍安装（占用情况重新判定，不静默杀进程）。</summary>
         void RetryInstall()
         {
             _failed = false;
+            _blockError = null;            // 上一次失败留下的旧警示不能带进新的一轮
             CancelBtn.Text = "取消";
-            Program.KillRunning(_dir);
+            // 期间程序被打开过就切回占用页，由用户决定要不要结束（规范 §三.1-7）
+            if (Program.RunningInstances(_dir).Length > 0)
+            {
+                ShowBlocked(Program.ExePathIn(_dir));
+                return;
+            }
             StartInstall();
         }
 
@@ -610,26 +834,39 @@ namespace TxtFormatSetup
             _done = true;
             Body.Controls.Clear();
 
-            TitleLabel.Text = "正在完成 " + Program.AppName + " 安装向导";
+            TitleLabel.Text = "安装完成";
             Back.Visible = false;
             CancelBtn.Visible = false;
             NextBtn.Text = "完成";
             NextBtn.Enabled = true;
+            LayoutButtons(86);
 
-            L(Program.AppName + " 已安装在您的计算机上。\n\n"
-              + "作者：" + Program.Author + "　　联系邮箱：" + Program.Email
-              + "\n\n桌面与开始菜单都有快捷方式，卸载可从「设置 → 应用」里操作。", 0, 0, 428, 106);
+            // 完成页版式（规范 §三 完成页）：结论行加粗 → 位置行单行截断 → 说明段 →
+            // 「立即运行」一个复选项 → 收尾。四个安装器逐字一致，只有「专属说明」那行各自不同。
+            int y = Head(Program.AppName + " 已安装在您的计算机上。", 0, 428);
+            y = LinePath("安装位置：" + _dir, y);
+            y += 10;
 
-            Strong("安装位置：", 0, 112, 428, 22);
-            L(_dir, 0, 134, 428, 20);
-
-            _cbRunNow = Check("立即运行 " + Program.AppName, 0, 170, 380, _run);
-            _cbReadme = Check("查看使用说明（" + Program.ReadmeName + "）", 0, 196, 380, false);
+            y = Line("作者：" + Program.Author + "　　联系邮箱：" + Program.Email, y, 428);
+            y = Line("桌面与开始菜单都有快捷方式，卸载可从「设置 → 应用」里操作。", y, 428);
+            y += 12;
+            _cbRunNow = Check("立即运行 " + Program.AppName, 0, y, 380, _run);
         }
 
+        /// <summary>
+        /// 把回调切回 UI 线程。BeginInvoke 失败（句柄正在销毁的边角）时同步 Invoke 再试一次，
+        /// 别让完成/失败回调静默丢掉、窗口停在「安装中」页（规范 §五）。
+        /// </summary>
         void Ui(Action a)
         {
-            try { if (IsHandleCreated) BeginInvoke(a); } catch { }
+            try
+            {
+                if (IsHandleCreated) BeginInvoke(a);
+            }
+            catch
+            {
+                try { if (IsHandleCreated && !IsDisposed) Invoke(a); } catch { }
+            }
         }
 
         void ShowBlocked(string path)
@@ -654,7 +891,13 @@ namespace TxtFormatSetup
 
             Strong("需要写入的文件正被占用：", 0, 0, 428, 22);
             L(_dir, 0, 24, 428, 20);
-            if (!string.IsNullOrEmpty(path)) L(path, 0, 46, 428, 20);
+            if (!string.IsNullOrEmpty(path))
+            {
+                var p = L(path, 0, 46, 428, 20);
+                p.AutoEllipsis = true;      // 长路径单行裁切时给省略号，别硬截成半截（与 cc 同款）
+                var tip = new ToolTip();
+                tip.SetToolTip(p, path);
+            }
 
             Strong("请选择一种处理方式：", 0, 80, 428, 22);
             L("· 点「结束进程并继续」—— 自动关闭正在运行的 " + Program.AppName
@@ -662,6 +905,13 @@ namespace TxtFormatSetup
               + "· 点「上一步」—— 回到上一页更改设置；\n"
               + "· 若上一步无效，请手动关闭 " + Program.AppName
               + "，再点「结束进程并继续」重试。", 0, 104, 428, 80);
+
+            // 结束失败时的页内警示（规范 §二.1：能做成页内提示的就不弹窗）
+            if (!string.IsNullOrEmpty(_blockError))
+            {
+                var warn = L(_blockError, 0, 190, 428, 40);
+                warn.ForeColor = Theme.Warn;
+            }
         }
 
         /// <summary>结束占用进程后重试安装；仍被占用则停在这一页，让用户手动处理。</summary>
@@ -673,14 +923,19 @@ namespace TxtFormatSetup
             if (Program.RunningInstances(_dir).Length > 0)
             {
                 NextBtn.Enabled = true;
-                MessageBox.Show(this,
-                    "没能结束正在运行的 " + Program.AppName + "（权限不足或进程未响应）。\n\n"
-                    + "请用任务管理器手动结束它，或重启计算机后再运行安装程序。",
-                    Program.AppName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                // 规范 §三.1-4：杀不掉要用**自绘对话框**兜住（不许用 MessageBox、
+                // 不响提示音），停在原页不继续安装，避免二次失败。
+                // 对话框按规范分段（空一行），页内那行行高有限，用不空行的紧凑版。
+                string head = "没能结束正在运行的 " + Program.AppName + "（权限不足或进程未响应）。";
+                string tail = "请用任务管理器手动结束它，或重启计算机后再运行安装程序。";
+                _blockError = head + "\r\n" + tail;
+                MsgDialog.Info(this, head + "\n\n" + tail, "没能结束进程");
+                ShowBlocked(_blockedPath);
                 return;
             }
 
             if (n > 0) Thread.Sleep(300);   // 等文件句柄真正释放
+            _blockError = null;             // 结束成功了，别把失败警示带进安装页
             StartInstall();
         }
     }

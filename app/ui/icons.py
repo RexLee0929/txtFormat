@@ -12,16 +12,26 @@ _PATHS: dict[str, str] = {
     "new": '<path d="M6 3h7l5 5v13H6z"/><path d="M13 3v5h5"/>',
     "open": '<path d="M3 7a1 1 0 0 1 1-1h5l2 2h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/>',
     "save": '<path d="M4 4h12l4 4v12H4z"/><path d="M8 4v6h7V4"/><path d="M8 20v-6h8v6"/>',
-    "format": '<path d="M4 6h10"/><path d="M4 12h16"/><path d="M4 18h12"/>'
-              '<circle cx="18" cy="6" r="2"/>',
+    # 格式整理 = 页边距竖线 + 文本行（原来只有三条横线加一个圆点，看不出是"排版"）
+    "format": '<path d="M4 3v18"/><path d="M8 6h12"/><path d="M8 12h9"/>'
+              '<path d="M8 18h11"/>',
     "check": '<circle cx="12" cy="12" r="8.5"/><path d="M8 12.5l2.6 2.6L16 9.5"/>',
-    "clean": '<path d="M5 19h14"/><path d="M7 15l7-9 4 3-7 9z"/><path d="M10 18l-1.5 2"/>',
-    "replace": '<path d="M4 8h11l-3-3"/><path d="M20 16H9l3 3"/>',
-    "split": '<path d="M12 3v18"/><path d="M5 8l-2 4 2 4"/><path d="M19 8l2 4-2 4"/>',
-    "merge": '<path d="M5 4v5c0 3 3 5 7 5s7 2 7 5v1"/><path d="M2 17l3 3 3-3"/>'
-             '<path d="M19 4v3"/><path d="M5 4v3"/>',
-    "goto": '<path d="M4 12h13"/><path d="M13 7l5 5-5 5"/><path d="M20 5v14"/>',
-    "convert": '<path d="M4 9h13l-3-3"/><path d="M20 15H7l3 3"/>',
+    # 广告检查 = 放大镜里带感叹号（原来是一支铅笔，与"编辑"混淆）
+    "clean": '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>'
+             '<path d="M11 8v3.5"/><circle cx="11" cy="14.4" r="0.9"/>',
+    # 自定义替换 = 箭头把内容推进方块（原来与 convert 的双向箭头几乎一样）
+    "replace": '<path d="M3 8h10"/><path d="M10 5l3 3-3 3"/><path d="M17 5h4v14h-4"/>',
+    # 章节整理 = 文档内横线分节（原来像两个括号）
+    "split": '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/>'
+             '<path d="M8 12h8"/><path d="M8 17h8"/>',
+    # 合并 = 两路汇成一路（原来是一条弯曲线，看不出是合并）
+    "merge": '<path d="M3 7h7"/><path d="M7 4l3 3-3 3"/>'
+             '<path d="M3 17h7"/><path d="M7 14l3 3-3 3"/>'
+             '<path d="M12 12h7"/><path d="M16 9l3 3-3 3"/>',
+    "goto": '<path d="M12 4v11"/><path d="M8 11l4 4 4-4"/><path d="M4 20h16"/>',
+    # 转换 = 两个文档之间过箭头（原来与 replace 撞车）
+    "convert": '<path d="M3 6h6v12H3z"/><path d="M15 6h6v12h-6z"/>'
+               '<path d="M10 12h4"/><path d="M12.5 10.5L14 12l-1.5 1.5"/>',
     "settings": '<path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h9M21 17h-1"/>'
                 '<circle cx="15" cy="7" r="2"/><circle cx="9" cy="12" r="2"/>'
                 '<circle cx="15" cy="17" r="2"/>',
@@ -29,6 +39,7 @@ _PATHS: dict[str, str] = {
     "redo": '<path d="M15 7l5 5-5 5"/><path d="M20 12h-9a5 5 0 0 0-5 5v1"/>',
     "search": '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
     "next": '<path d="M5 12h12"/><path d="M13 7l5 5-5 5"/>',
+    "play": '<path d="M8 5.5v13l11-6.5z"/>',
     "prev": '<path d="M19 12H7"/><path d="M11 7l-5 5 5 5"/>',
     "folder": '<path d="M3 7a1 1 0 0 1 1-1h5l2 2h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/>',
     "file": '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/>',

@@ -106,6 +106,35 @@ def read_text(path: str, encoding: str | None = None) -> DecodedText:
     return decode(data, encoding)
 
 
+#: 数据/用户文本文件的通用解码顺序（UTF-8 含 BOM → GB18030）
+TEXT_CODECS: tuple[str, ...] = ("utf-8-sig", "gb18030")
+
+
+def decode_first(data: bytes, codecs: tuple[str, ...] = TEXT_CODECS) -> str | None:
+    """按给定顺序尝试解码，返回第一个成功的文本；全都失败返回 None。
+
+    原先「for codec in (...): try decode / except continue」这段循环在
+    7 个文件里各抄了一份（formatter / checkers / adfilter / regexlib /
+    convert ×4），改一处永远漏另一处 —— 统一收在这里。
+    """
+    for codec in codecs:
+        try:
+            return data.decode(codec)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return None
+
+
+def read_text_any(path: str, codecs: tuple[str, ...] = TEXT_CODECS) -> str | None:
+    """读一个文本文件（自动尝试多种编码）。读不到/解不出返回 None。"""
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    return decode_first(data, codecs)
+
+
 def encode(text: str, encoding: str, newline: str = "\r\n", keep_bom: bool = True) -> bytes:
     """把内部文本编码为字节。``encoding`` 为 codec 名。"""
     body = text.replace("\n", newline) if newline != "\n" else text

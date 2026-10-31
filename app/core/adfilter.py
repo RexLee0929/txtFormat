@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import re
 
+from . import encoding as enc
 from . import regexlib
 
 
@@ -42,14 +43,8 @@ def write_remove_list(path: str, fragments: list[str]) -> None:
 def read_remove_list(path: str) -> list[str]:
     if not os.path.exists(path):
         return []
-    for codec in ("utf-8-sig", "gb18030"):
-        try:
-            with open(path, encoding=codec) as fh:
-                raw = fh.read()
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
+    raw = enc.read_text_any(path)
+    if raw is None:
         return []
     return [line for line in raw.replace("\r\n", "\n").split("\n") if line.strip()]
 

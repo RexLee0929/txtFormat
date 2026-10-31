@@ -10,8 +10,9 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import zhconv
-from .paths import find_user_file
+from . import encoding as enc
+from . import punct, zhconv
+from .paths import data_dir, find_user_file
 
 
 @dataclass(slots=True)
@@ -33,8 +34,7 @@ _TYPO_CACHE: dict[str, str] | None = None
 
 
 def _typo_path() -> str:
-    return find_user_file("typos.txt") or os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "typos.txt")
+    return find_user_file("typos.txt") or os.path.join(data_dir(), "typos.txt")
 
 
 def load_typos() -> dict[str, str]:
@@ -42,23 +42,15 @@ def load_typos() -> dict[str, str]:
     if _TYPO_CACHE is not None:
         return _TYPO_CACHE
     table: dict[str, str] = {}
-    path = _typo_path()
-    if os.path.exists(path):
-        for codec in ("utf-8-sig", "gb18030"):
-            try:
-                with open(path, encoding=codec) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line or line.startswith("#") or "=" not in line:
-                            continue
-                        wrong, right = line.split("=", 1)
-                        wrong, right = wrong.strip(), right.strip()
-                        if wrong and right and wrong != right:
-                            table[wrong] = right
-                break
-            except UnicodeDecodeError:
-                table.clear()
-                continue
+    raw = enc.read_text_any(_typo_path())
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        wrong, right = line.split("=", 1)
+        wrong, right = wrong.strip(), right.strip()
+        if wrong and right and wrong != right:
+            table[wrong] = right
     _TYPO_CACHE = table
     return table
 
@@ -191,17 +183,13 @@ def check_brackets(text: str) -> list[Issue]:
 
 
 # --------------------------------------------------------------- 标点
-_ILLEGAL_PUNCT = re.compile(
-    r"！[，。；：、]|，[：。！？；、]|。[，！：；？、]|：[，；！。？、]|、[。，！？；]|？[、，。；：]"
-    r"|(?<!…)…(?!…)|《[\x4e00-\x9fa5]+[。\.][\x4e00-\x9fa5]+》|[﹑﹁﹂﹄﹃︵︶︻︼︰]"
-    r"|[…]{3,}|[。.]{2,}|[．\.。，\,、·`]{2,}|““|””|‘‘|’’|：”|：’|''|\"\""
-)
-
-
+# 规则表在 punct.PUNCT_RULES（与「格式整理」的改写步骤同一份数据源），
+# 这里只负责把命中包装成 Issue，不再各写一套正则。
 def check_punct(text: str) -> list[Issue]:
     out: list[Issue] = []
-    for m in _ILLEGAL_PUNCT.finditer(text):
-        out.append(Issue(m.start(), m.end(), m.group(0), "不规则标点", "", "标点使用不符合 GB/T 15834—2011"))
+    for m in punct.illegal_punct_rx().finditer(text):
+        out.append(Issue(m.start(), m.end(), m.group(0), "不规则标点",
+                         punct.describe(text, m), "标点使用不符合 GB/T 15834—2011"))
     return out
 
 

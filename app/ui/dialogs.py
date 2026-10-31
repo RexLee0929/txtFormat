@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox,
                                QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QMessageBox, QPushButton, QRadioButton, QSpinBox, QTableWidget,
-                               QTableWidgetItem, QTextBrowser, QToolTip, QVBoxLayout,
-                               QWidget)
+                               QPushButton, QRadioButton, QSpinBox, QTableWidget,
+                               QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget)
 
 from ..core import chapter as chapter_mod
 from ..core import checkers, encoding as enc
@@ -18,20 +17,69 @@ from ..core.settings import Settings
 from ..core.version import (APP_NAME, APP_SUBTITLE, APP_VERSION, AUTHOR, AUTHOR_EMAIL,
                             COPYRIGHT)
 from . import icons
-from .theme import ACCENT, Color
+from .theme import ACCENT, Color, apply_dwm_chrome
+from .task import start_task, task_running, wait_task
 from .widgets import (Caption, CommandButton, CopyChip, IconButton, PrimaryButton,
                       SectionLabel)
 
 
 class BaseDialog(QDialog):
+    """对话框基类（规范 §七.2：主窗口的延续，不另立样式）。
+
+    * **DWM 标题栏与主窗口同一套**（caption = #F3F3F3）—— 对话框不再是
+      「另一种标题栏」；
+    * **宽度固定、NoResize、高度按内容拟合**：禁止用户拉伸；
+    * 行内提示出现/消失时高度跟着重算，内容不会被截。
+    """
+
     def __init__(self, title: str, parent: QWidget | None = None, width: int = 560):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumWidth(width)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, False)
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, False)
         self.root = QVBoxLayout(self)
         self.root.setContentsMargins(20, 18, 20, 18)
         self.root.setSpacing(14)
+        self._notice: QLabel | None = None
+
+    # ---------------------------------------------------------------- 尺寸
+    def showEvent(self, event):                # noqa: N802 - Qt 命名
+        super().showEvent(event)
+        # 句柄建好才能做 DWM 定制（过早调用拿不到有效 hwnd）
+        apply_dwm_chrome(int(self.winId()))
+        self.setFixedSize(self.size())
+
+    def refit(self) -> None:
+        """内容增删后按新的内容高度重设窗口高（宽度保持不变）。"""
+        self.setFixedHeight(self.sizeHint().height())
+
+    # ---------------------------------------------------------------- 行内提示
+    def notice(self, text: str = "", kind: str = "info") -> None:
+        """页内提示（规范 §七 ②：行内提示 / 错误）。
+
+        凡是「知道了就行」的反馈都用它，不弹窗：
+
+        * ``kind="info"`` —— 成功/完成，灰色一行文字；
+        * ``kind="error"`` —— 出错，警示色（#9D5D00）文字。
+
+        提示区固定在按钮栏**上面**，不占正文位置；连续调用只更新文字，
+        不会把版面顶来顶去。
+        """
+        if self._notice is None:
+            self._notice = QLabel("")
+            self._notice.setWordWrap(True)
+            self._notice.setStyleSheet(
+                f"color: {Color.text_secondary}; font-size: 12px;")
+            # 插到按钮栏（root 最后一项）之前
+            self.root.insertWidget(self.root.count() - 1, self._notice)
+        self._notice.setText(text)
+        color = Color.warning if kind == "error" else Color.text_secondary
+        self._notice.setStyleSheet(f"color: {color}; font-size: 12px;")
+        self._notice.setVisible(bool(text))
+        # 提示出现/消失会改变内容高度，窗口高度跟着重算（NoResize 下内容不能被截）
+        self.refit()
 
     def add_footer(self, ok_text: str = "确定", cancel_text: str = "取消") -> QHBoxLayout:
         row = QHBoxLayout()
@@ -178,7 +226,8 @@ class OptionsDialog(BaseDialog):
         bottom.addStretch(1)
         self.root.addLayout(bottom)
 
-        self.add_footer()
+        # 主按钮写动词（规范 §七.3）：按钮要说清点下去会发生什么
+        self.add_footer("保存")
 
     def _reset(self) -> None:
         self.settings.reset_format_options()
@@ -190,7 +239,8 @@ class OptionsDialog(BaseDialog):
             setattr(self.settings, key, getattr(defaults, key))
         self.indent_spin.setValue(self.settings.indent_count)
         self.width_spin.setValue(self.settings.hard_return_width)
-        QMessageBox.information(self, "提示", "选项已恢复为默认值！")
+        # 规范 §七 ②：能用行内提示的就不弹窗
+        self.notice("选项已恢复为默认值。")
 
 
 # ------------------------------------------------------------------ 章节
@@ -263,6 +313,7 @@ class SplitDialog(BaseDialog):
         btn_drop_name.clicked.connect(self._remove_names)
         btn_drop = CommandButton("删除选定章节", "trash")
         btn_drop.clicked.connect(self._remove_chapters)
+        self.btn_remove = btn_drop          # 内联确认时按钮就地变形
         for b in (btn_norm, btn_reorder, btn_export, btn_drop_name, btn_drop):
             actions.addWidget(b)
         actions.addStretch(1)
@@ -305,7 +356,7 @@ class SplitDialog(BaseDialog):
         foot.addWidget(self.mode_chapter)
         foot.addWidget(self.mode_size)
         foot.addStretch(1)
-        cancel = QPushButton("退出")
+        cancel = QPushButton("取消")
         cancel.clicked.connect(self.reject)
         foot.addWidget(cancel)
         ok = PrimaryButton("分割")
@@ -369,13 +420,13 @@ class SplitDialog(BaseDialog):
         self.result_text, count = chapter_mod.normalize_titles(
             self.result_text, self.current_pattern(), self.title_mode)
         self.reload_chapters()
-        QMessageBox.information(self, "规范化章节标题", f"共规范化 {count} 个章节标题。")
+        self.notice(f"共规范化 {count} 个章节标题。")
 
     def _reorder(self) -> None:
         self.result_text, count = chapter_mod.renumber(
             self.result_text, self.current_pattern(), self.title_mode)
         self.reload_chapters()
-        QMessageBox.information(self, "重排章节顺序", f"已按列表顺序重新编号 {count} 处。")
+        self.notice(f"已按列表顺序重新编号 {count} 处。")
 
     def _remove_names(self) -> None:
         rows = self._selected_rows()
@@ -394,13 +445,21 @@ class SplitDialog(BaseDialog):
         rows = self._selected_rows()
         if not rows:
             return
-        if QMessageBox.question(self, "删除选定章节",
-                                "将连同章节名与正文一起删除，且不可撤销。继续吗？") != QMessageBox.StandardButton.Yes:
+        # 规范 §七 ③：不可逆操作做**内联确认**（按钮就地变「确认删除」），
+        # 不弹模态框 —— 弹窗会把流程打断，用户连删的是哪几章都没看见。
+        btn = self.btn_remove
+        if not getattr(self, "_remove_armed", False):
+            self._remove_armed = True
+            btn.setText("确认删除")
+            self.notice(f"将删除 {len(rows)} 个章节（含正文，不可撤销）。再点一次「确认删除」执行。")
             return
+        self._remove_armed = False
+        btn.setText("删除选定章节")
         spans = [(self.chapters[r].start, self.chapters[r].end) for r in rows if 0 <= r < len(self.chapters)]
         for start, end in sorted(spans, reverse=True):
             self.result_text = self.result_text[:start] + self.result_text[end:]
         self.reload_chapters()
+        self.notice(f"已删除 {len(rows)} 个章节。")
 
     def _export_titles(self) -> None:
         default_dir = self.out_edit.text() or os.path.dirname(self.settings.last_dir or ".")
@@ -410,17 +469,22 @@ class SplitDialog(BaseDialog):
             return
         content = "\n".join(f"{c.index}\t{c.title}\t{c.char_count}" for c in self.chapters)
         enc.save_text(path, content + "\n", "utf-8", "\n")
-        QMessageBox.information(self, "导出完成", f"共写入章节名 {len(self.chapters)} 条。")
+        # 记住本次落点，下次打开/另存为优先到这里（路径记忆统一写 last_dir）
+        self.settings.last_dir = os.path.dirname(path)
+        self.notice(f"导出完成，共写入章节名 {len(self.chapters)} 条。")
 
     def _pick_dir(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "选择分割后的文件所在目录")
+        path = QFileDialog.getExistingDirectory(self, "选择分割后的文件所在目录",
+                                                self.settings.last_dir or "")
         if path:
             self.out_edit.setText(path)
+            self.settings.last_dir = path
 
     def _do_split(self) -> None:
         out_dir = self.out_edit.text().strip()
         if not out_dir:
-            QMessageBox.warning(self, "提示", "请先选择分割后的文件保存位置。")
+            # 规范 §七 ②：出错写在页里，不弹窗
+            self.notice("请先选择分割后的文件保存位置。", "error")
             return
         self.split_requested = {
             "out_dir": out_dir,
@@ -495,15 +559,17 @@ class MergeDialog(BaseDialog):
         self.add_footer("合并")
 
     def _pick_dir(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "选择合并后的文件保存位置")
+        path = QFileDialog.getExistingDirectory(self, "选择合并后的文件保存位置",
+                                                self.settings.last_dir or "")
         if path:
             self.dir_edit.setText(path)
+            self.settings.last_dir = path
 
     def accept(self) -> None:
         directory = self.dir_edit.text().strip()
         name = self.name_edit.text().strip()
         if not directory or not name:
-            QMessageBox.warning(self, "提示", "请填写文件名与保存位置。")
+            self.notice("请填写文件名与保存位置。", "error")
             return
         if not name.lower().endswith(".txt"):
             name += ".txt"
@@ -575,15 +641,57 @@ class QuickReviewDialog(BaseDialog):
         closer.clicked.connect(self.accept)
         self.root.addWidget(closer, 0, Qt.AlignmentFlag.AlignRight)
 
-    def _run(self) -> None:
-        self._all = []
+    def preselect(self, keys: set[str] | tuple[str, ...] | list[str]) -> None:
+        """勾选指定检查器并立刻跑一遍（主窗口「一键审核」按正则库条目调过来）。
+
+        对外公开的方法 —— 主窗口原来直接摸 ``dialog._checks`` 和 ``dialog._run()``，
+        私有成员一改签名就崩，这种跨类耦合必须收进来。
+        """
+        wanted = set(keys)
         for key, cb in self._checks:
-            if not cb.isChecked():
-                continue
-            try:
-                self._all.extend(checkers.run_checker(key, self.text))
-            except Exception as exc:                    # noqa: BLE001
-                QMessageBox.warning(self, "检查出错", f"{cb.text()}：{exc}")
+            cb.setChecked(key in wanted)
+        self._run()
+
+    def _run(self) -> None:
+        """在后台线程跑检查（全文错别字/的得地/标点扫描是秒级的活）。
+
+        以前这里同步跑：文档一大，点「开始检查」窗口就整段假死（连"取消"都点不动）。
+        现在把选中的检查器丢到后台，跑完再回 UI 线程填表。
+        """
+        if task_running(self):
+            return
+        picked = [(key, cb) for key, cb in self._checks if cb.isChecked()]
+        if not picked:
+            self.notice("请至少勾选一项检查。", "error")
+            return
+        self.summary.setText("正在检查…")
+        self.table.setRowCount(0)
+        text = self.text
+
+        def work():
+            found: list[checkers.Issue] = []
+            errors: list[str] = []
+            for key, cb in picked:
+                try:
+                    found.extend(checkers.run_checker(key, text))
+                except Exception as exc:                # noqa: BLE001 - 单个检查器出错不拖垮整轮
+                    errors.append(f"{cb.text()}：{exc}")
+            return found, errors
+
+        def apply(result) -> None:
+            self._all, errors = result
+            # 规范 §七 ②：单个检查器出错写在页里，不弹窗（弹窗会把结果表盖住）
+            if errors:
+                self.notice("；".join(errors[:3]), "error")
+            self._fill_table()
+
+        def failed(message: str) -> None:
+            self.summary.setText("")
+            self.notice(f"检查失败：{message}", "error")
+
+        start_task(self, work, apply, failed)
+
+    def _fill_table(self) -> None:
         self._all.sort(key=lambda i: i.start)
         self.table.setRowCount(len(self._all))
         for row, issue in enumerate(self._all):
@@ -593,6 +701,11 @@ class QuickReviewDialog(BaseDialog):
             self.table.setItem(row, 3, QTableWidgetItem(str(issue.start)))
         kinds = len({i.kind for i in self._all})
         self.summary.setText(f"共找到 {kinds} 类 / {len(self._all)} 处问题" if self._all else "未发现问题。")
+
+    def closeEvent(self, event) -> None:                # noqa: N802 - Qt 命名
+        # 后台检查没跑完就关窗会让 QThread 在运行中被析构（进程直接崩）
+        wait_task(self, 3000)
+        super().closeEvent(event)
 
     def _goto_issue(self, index) -> None:
         row = index.row()
@@ -626,7 +739,7 @@ class GotoDialog(BaseDialog):
         self.line_radio.toggled.connect(lambda on: (self.spin.setEnabled(on), self.percent.setEnabled(not on),
                                                     self.percent.setValue(0)))
         self.percent.setEnabled(False)
-        self.add_footer()
+        self.add_footer("转到")
 
     def value(self) -> tuple[str, int]:
         return ("line", self.spin.value()) if self.line_radio.isChecked() else ("percent", self.percent.value())
@@ -653,7 +766,7 @@ class RecodeDialog(BaseDialog):
         self.newline.addItem("Mac (CR)", "\r")
         self.newline.setMinimumHeight(32)
         self.root.addWidget(self.newline)
-        self.add_footer()
+        self.add_footer("应用")
 
     def target(self) -> tuple[str, str]:
         return self.combo.currentData(), self.newline.currentData()
@@ -689,15 +802,18 @@ Tab / Shift+Tab 缩进 / 反缩进　Ctrl+= / Ctrl+- 缩放字号</p>
 class AboutDialog(BaseDialog):
     def __init__(self, parent: QWidget | None = None):
         super().__init__("关于 " + APP_NAME, parent, 640)
-        browser = QTextBrowser()
-        browser.setOpenExternalLinks(False)          # 不打开外部程序
-        browser.setHtml(ABOUT_TEXT)
-        browser.setStyleSheet(f"background: {Color.card}; border: 1px solid {Color.border};"
-                              f"border-radius: 8px; padding: 14px;")
-        browser.setMinimumHeight(400)
-        self.root.addWidget(browser)
+        self._browser = QTextBrowser()
+        self._browser.setOpenExternalLinks(False)          # 不打开外部程序
+        self._browser.setHtml(ABOUT_TEXT)
+        self._browser.setStyleSheet(f"background: {Color.card}; border: 1px solid {Color.border};"
+                                    f"border-radius: 8px; padding: 14px;")
+        # 高度不写死（规范 §八）：showEvent 里按富文本真实高度拟合
+        self.root.addWidget(self._browser)
 
         # ---- 联系方式：点击即复制，不跳转、不调用邮件客户端
+        # 交互与 ComicConverter 的「关于」对话框同构：胶囊是唯一的复制入口，
+        # 按钮栏只留「关闭」——复制成功时胶囊变强调色，右侧出现「已复制到剪贴板」，
+        # 1.6 秒后自动恢复。不弹 tooltip 气泡（气泡会挡住下方内容）。
         box = QFrame()
         box.setObjectName("ContactBox")
         box.setStyleSheet(f"#ContactBox {{ background: {Color.card_alt};"
@@ -710,29 +826,49 @@ class AboutDialog(BaseDialog):
         row.addWidget(who)
         self.chip = CopyChip(AUTHOR_EMAIL, hint="点击复制邮箱")
         row.addWidget(self.chip)
-        self.hint = Caption("点击即可复制")
+        # 平时为空；点击复制后在这里显示「已复制到剪贴板」，1.6 秒后自动消失
+        self.hint = Caption("")
         self.hint.setStyleSheet(f"color: {Color.text_tertiary}; font-size: 11px;")
         row.addWidget(self.hint)
         row.addStretch(1)
         self.root.addWidget(box)
 
+        self._hint_timer = QTimer(self)
+        self._hint_timer.setSingleShot(True)
+        self._hint_timer.timeout.connect(lambda: self.hint.setText(""))
+        self.chip.copied.connect(self._on_copied)
+
         footer = QHBoxLayout()
         footer.addStretch(1)
-        copy_btn = CommandButton("复制邮箱", "copy")
-        copy_btn.setToolTip(f"把 {AUTHOR_EMAIL} 复制到剪贴板")
-        copy_btn.clicked.connect(self._copy)
-        footer.addWidget(copy_btn)
         close_btn = PrimaryButton("关闭")
         close_btn.setDefault(True)
         close_btn.clicked.connect(self.accept)
         footer.addWidget(close_btn)
         self.root.addLayout(footer)
 
-    def _copy(self) -> None:
-        self.chip.copy()
-        # 只弹一个提示气泡，邮箱与说明文字保持不变
-        QToolTip.showText(self.chip.mapToGlobal(self.chip.rect().bottomLeft()),
-                          f"已复制 {AUTHOR_EMAIL}", self.chip)
+    def showEvent(self, event):                # noqa: N802 - Qt 命名
+        super().showEvent(event)
+        # 宽度定下来后按富文本真实高度拟合（规范 §八：高自动拟合、不写死、
+        # 不出现窗口级滚动条）。document().size() 在布局后测量，下一轮事件再收敛一次。
+        self.setFixedWidth(self.width())
+        self._fit_height()
+        QTimer.singleShot(0, self._fit_height)
+
+    def _fit_height(self) -> None:
+        doc_h = self._browser.document().size().height()
+        # +30 = 卡片内边距 14×2 + 边框/圆角余量
+        self._browser.setFixedHeight(max(120, int(doc_h) + 30))
+        self.setFixedHeight(self.sizeHint().height())
+
+    def _on_copied(self, value: str) -> None:
+        """复制结果的反馈：胶囊已变色，这里补一句右侧提示。"""
+        if value:
+            self.hint.setStyleSheet(f"color: {ACCENT}; font-size: 11px;")
+            self.hint.setText("已复制到剪贴板")
+        else:
+            self.hint.setStyleSheet(f"color: {Color.text_tertiary}; font-size: 11px;")
+            self.hint.setText("复制失败，请手动选中邮箱文字复制")
+        self._hint_timer.start(1600)
 
 
 __all__ = ["OptionsDialog", "SplitDialog", "MergeDialog", "QuickReviewDialog",

@@ -1,7 +1,7 @@
 """版本与应用元信息。"""
 
 APP_NAME = "txtFormat"          # 程序名：仅英文名
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.4"
 APP_TITLE = "txtFormat"
 APP_SUBTITLE = "长文本整理工具"
 

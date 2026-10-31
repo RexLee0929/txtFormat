@@ -5,6 +5,7 @@
        规范 §三.3 明确要求判定逻辑能被单独测试 —— GUI 驱动不可靠，测纯逻辑才行。
 
        cd tools/verify_upgrade 然后 dotnet run                # 跑全部
+       cd tools/verify_upgrade 然后 dotnet run 加 dialog 参数  # 只看自绘对话框
   -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -38,6 +39,7 @@
     <Compile Include="..\..\installer\winforms\WizardShell.cs" />
     <Compile Include="..\..\installer\winforms\InstallForm.cs" />
     <Compile Include="..\..\installer\winforms\UninstallForm.cs" />
+    <Compile Include="..\..\installer\winforms\NoticeDialog.cs" />
     <Compile Include="Program.cs" />
   </ItemGroup>
 

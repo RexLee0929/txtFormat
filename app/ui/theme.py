@@ -1,7 +1,11 @@
 """Windows 11 Fluent 设计令牌与全局样式表。
 
-配色遵循 Win11 浅色主题（与系统强调色联动），控件尺寸、圆角、间距
-参照 Fluent Design 的 4px 栅格：控件圆角 4px、卡片 8px、控件高 32px。
+配色遵循 Win11 浅色主题，控件尺寸、圆角、间距参照 Fluent Design 的
+4px 栅格：控件圆角 4px、卡片 8px、控件高 32px。
+
+**强调色由程序图标派生**（程序本体设计规范 §三）：唯一品牌色输入 = app.ico，
+按钮底色、勾选标记、链接、选中胶囊、输入框聚焦边、进度条全部由图标主色算出；
+代码里不出现品牌色字面值（中性灰阶除外）。换图标整套界面跟着换。
 """
 
 from __future__ import annotations
@@ -10,10 +14,7 @@ import os
 import sys
 import tempfile
 
-try:                                     # 仅 Windows 有 winreg
-    import winreg
-except ImportError:                      # pragma: no cover
-    winreg = None  # type: ignore
+from ..core.accent import palette as _icon_palette
 
 
 def _assets_dir() -> str:
@@ -69,32 +70,35 @@ class Color:
     hoverline = "#E8E8E8"
     disabled = "#B5B5B5"
     editor_bg = "#FFFFFF"
-    selection = "#CCE4F7"
-    accent_fallback = "#0067C0"
+    # selection 已按规范 §三 改由图标派生（ACCENT_SOFT），不再写死 #CCE4F7；
+    # success 未使用，已删除 —— 语义色只保留 danger / warning（规范 §七.2）。
     danger = "#C42B1C"
-    success = "#0F7B0F"
     warning = "#9D5D00"
 
 
-def _system_accent() -> str:
-    """读取系统强调色（AccentColor 为 ABGR）。"""
-    if winreg is None or sys.platform != "win32":
-        return Color.accent_fallback
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\DWM") as key:
-            value, _ = winreg.QueryValueEx(key, "AccentColor")
-        b = value & 0xFF
-        g = (value >> 8) & 0xFF
-        r = (value >> 16) & 0xFF
-        # 太亮/太灰的强调色在浅色主题下可读性差，退回默认蓝
-        if r + g + b < 180 or (r > 235 and g > 235 and b > 235):
-            return Color.accent_fallback
-        return f"#{r:02X}{g:02X}{b:02X}"
-    except OSError:
-        return Color.accent_fallback
+# ------------------------------------------------------------------ 品牌色
+#: 由 app.ico 派生的四个用途色（规范 §三 的公式表）。
+#: 换图标整套界面跟着换；取不到主色时走固定种子，与正常路径同一套派生函数。
+#:
+#: 取色走 app/core/accent.py（Qt 的 ICO 插件读图，QImage 不需要 QGuiApplication）
+#: —— 所以在 import 期就能安全求值，不依赖 QApplication 是否已建。
+_PALETTE = _icon_palette()
+
+#: 强调色（主按钮底、勾选、链接、选中胶囊、输入框聚焦边、进度条）
+ACCENT = _PALETTE["accent"]
+#: 强调暗（按下态）
+ACCENT_DARK = _PALETTE["dark"]
+#: 浅底（选中胶囊、轻提示）
+ACCENT_SOFT = _PALETTE["soft"]
+#: 微光悬停
+ACCENT_HOVER_BG = _PALETTE["hover"]
 
 
-ACCENT = _system_accent()
+def accent_color() -> str:
+    """强调色（函数形式，供 stylesheet() 内部取用）。"""
+    return _PALETTE["accent"]
+
+
 FONT_FAMILY = "Microsoft YaHei UI"
 MONO_FAMILY = "Microsoft YaHei UI"
 
@@ -107,13 +111,30 @@ def mix(hex_a: str, hex_b: str, ratio: float) -> str:
     return "#{:02X}{:02X}{:02X}".format(*out)
 
 
-ACCENT_HOVER = mix(ACCENT, "#FFFFFF", 0.10)
-ACCENT_PRESSED = mix(ACCENT, "#000000", 0.12)
+def accent_hover() -> str:
+    """强调色悬停态（提亮一档）。"""
+    return mix(ACCENT, "#FFFFFF", 0.10)
+
+
+def accent_pressed() -> str:
+    """强调色按下态（压暗一档）。"""
+    return mix(ACCENT, "#000000", 0.12)
+
+
+ACCENT_HOVER = accent_hover()
+ACCENT_PRESSED = accent_pressed()
 
 
 # ------------------------------------------------------------------ 样式表
-def stylesheet(scale: float = 1.0) -> str:
-    s = lambda v: max(1, round(v * scale))          # noqa: E731
+def stylesheet() -> str:
+    # 原先有个 scale 参数，从未有调用方传过值（全是 stylesheet()），
+    # 留着只会让人以为支持缩放 —— 高 DPI 由 Qt 统一处理，删掉。
+    s = lambda v: max(1, round(v))          # noqa: E731
+    # 强调色在这里才取值 —— stylesheet() 一定在 QApplication 之后才被调用
+    ACCENT = accent_color()
+    ACCENT_HOVER = accent_hover()
+    ACCENT_PRESSED = accent_pressed()
+    ACCENT_SOFT = _PALETTE["soft"]
     return f"""
 * {{
     font-family: "{FONT_FAMILY}";
@@ -201,8 +222,16 @@ QPushButton[kind="subtle"] {{
 QPushButton[kind="subtle"]:hover {{ background: {Color.hover}; }}
 QPushButton[kind="subtle"]:pressed {{ background: {Color.pressed}; }}
 
-QPushButton[kind="danger"] {{ color: {Color.danger}; border-color: {Color.border}; }}
-QPushButton[kind="danger"]:hover {{ background: #FDF3F2; }}
+/* 危险操作的主按钮（规范 §七.3）：语义色红底白字，悬停不变色、按下加深 */
+QPushButton[kind="danger"] {{
+    background: {Color.danger};
+    color: #FFFFFF;
+    border: none;
+    font-weight: 600;
+}}
+QPushButton[kind="danger"]:hover {{ background: {Color.danger}; }}
+QPushButton[kind="danger"]:pressed {{ background: {mix(Color.danger, "#000000", 0.15)}; }}
+QPushButton[kind="danger"]:disabled {{ background: {Color.border_strong}; color: #FFFFFF; }}
 QPushButton[compact="true"] {{ padding: {s(5)}px {s(6)}px; }}
 QPushButton[compact="true"]:checked {{
     background: {mix(ACCENT, "#FFFFFF", 0.86)};
@@ -218,7 +247,7 @@ QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit, QListWidget, QTreeWid
     background: {Color.card};
     border: 1px solid {Color.border};
     border-radius: {s(4)}px;
-    selection-background-color: {Color.selection};
+    selection-background-color: {ACCENT_SOFT};
     selection-color: {Color.text};
 }}
 QLineEdit {{ padding: {s(5)}px {s(9)}px; min-height: {s(22)}px; }}
@@ -250,20 +279,23 @@ QComboBox QAbstractItemView {{
     background: {Color.card};
     border: none;
     border-radius: 0px;
-    padding: 0px;
+    /* 内边距让条目从容器圆角/边框里缩进一圈：原先条目通到边上，
+       选中项的外框贴着弹层边框，看着像套了两层框 */
+    padding: {s(4)}px;
     margin: 0px;
     outline: 0px;
-    selection-background-color: {Color.selection};
+    selection-background-color: {ACCENT_SOFT};
     selection-color: {Color.text};
 }}
 QComboBox QAbstractItemView::item {{
     min-height: {s(26)}px;
     padding: {s(3)}px {s(10)}px;
     border: none;
+    border-radius: {s(4)}px;
 }}
 QComboBox QAbstractItemView::item:hover {{ background: {Color.hover}; }}
 QComboBox QAbstractItemView::item:selected {{
-    background: {Color.selection};
+    background: {ACCENT_SOFT};
     color: {Color.text};
 }}
 QSpinBox::up-button, QSpinBox::down-button {{
@@ -313,7 +345,7 @@ QListWidget::item, QTreeWidget::item {{
 }}
 QListWidget::item:hover, QTreeWidget::item:hover {{ background: {Color.hover}; }}
 QListWidget::item:selected, QTreeWidget::item:selected {{
-    background: {Color.selection};
+    background: {ACCENT_SOFT};
     color: {Color.text};
 }}
 /* 常用正则表达式：常驻固定列表，行高固定、不出现横向滚动条 */
@@ -422,6 +454,47 @@ QLabel[role="hint"] {{ color: {Color.text_tertiary}; font-size: {s(11)}px; }}
 """
 
 
+# ------------------------------------------------------------------ DWM 标题栏
+def apply_dwm_chrome(hwnd: int | None = None) -> None:
+    """按《程序本体设计规范》§四定制系统标题栏（主窗口与所有对话框共用）。
+
+    caption 色与内容区底色一致，标题栏和内容区看起来是一体的；
+    border 比 caption 深一档，看得见窗口边界但不刺眼。
+    Win11 的 DWM 用 COLORREF（0x00BBGGRR），不是 RGB —— 顺序别写反。
+    老系统不支持就静默跳过，不崩。
+    """
+    if sys.platform != "win32" or not hwnd:
+        return
+
+    def rgb(r: int, g: int, b: int) -> int:
+        return (b << 16) | (g << 8) | r
+
+    try:
+        import ctypes
+
+        def hex_to_colorref(value: str) -> int:
+            value = value.lstrip("#")
+            r, g, b = (int(value[i:i + 2], 16) for i in (0, 2, 4))
+            return rgb(r, g, b)
+
+        dwmapi = ctypes.WinDLL("dwmapi")
+        handle = hwnd
+
+        def set_attr(attr: int, value: int) -> None:
+            v = ctypes.c_int(value)
+            dwmapi.DwmSetWindowAttribute(ctypes.c_void_p(handle), ctypes.c_uint(attr),
+                                         ctypes.byref(v), ctypes.sizeof(v))
+
+        set_attr(20, 0)                                  # DWMWA_USE_IMMERSIVE_DARK_MODE = 浅色
+        set_attr(33, 2)                                  # 圆角
+        set_attr(34, hex_to_colorref("#E8E8E8"))         # 边框色，比 caption 深一档
+        set_attr(35, hex_to_colorref(Color.window))      # caption = 内容区底色 #F3F3F3
+        set_attr(36, hex_to_colorref(Color.text))        # 标题文字 #1B1B1B
+        set_attr(38, 0)                                  # 保持纯色背景，保证文字可读
+    except Exception:       # noqa: BLE001 - 老系统上失败不影响使用
+        pass
+
+
 def editor_font_qss(family: str, size_pt: float, line_percent: int) -> str:
     return f"""
 QPlainTextEdit[role="editor"] {{
@@ -432,7 +505,7 @@ QPlainTextEdit[role="editor"] {{
     font-family: "{family}";
     font-size: {size_pt:.1f}pt;
     line-height: {line_percent}%;
-    selection-background-color: {Color.selection};
+    selection-background-color: {ACCENT_SOFT};
     selection-color: {Color.text};
     color: {Color.text};
 }}
@@ -440,4 +513,5 @@ QPlainTextEdit[role="editor"] {{
 
 
 __all__ = ["Color", "ACCENT", "ACCENT_HOVER", "ACCENT_PRESSED", "FONT_FAMILY",
-           "stylesheet", "editor_font_qss", "mix"]
+           "stylesheet", "editor_font_qss", "mix", "apply_dwm_chrome",
+           "accent_color", "accent_hover", "accent_pressed"]

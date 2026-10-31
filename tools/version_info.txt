@@ -2,8 +2,8 @@
 # PyInstaller 版本资源：写入 exe 的“属性 → 详细信息”
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 2, 0),
-    prodvers=(1, 0, 2, 0),
+    filevers=(1, 0, 4, 0),
+    prodvers=(1, 0, 4, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -18,13 +18,13 @@ VSVersionInfo(
           u'080404B0',
           [StringStruct(u'CompanyName', u'Rex Lee'),
            StringStruct(u'FileDescription', u'txtFormat'),
-           StringStruct(u'FileVersion', u'1.0.2.0'),
+           StringStruct(u'FileVersion', u'1.0.4.0'),
            StringStruct(u'InternalName', u'txtFormat'),
            StringStruct(u'LegalCopyright', u'MIT License, Copyright (c) 2026 Rex Lee'),
            StringStruct(u'LegalTrademarks', u''),
            StringStruct(u'OriginalFilename', u'txtFormat.exe'),
            StringStruct(u'ProductName', u'txtFormat'),
-           StringStruct(u'ProductVersion', u'1.0.2'),
+           StringStruct(u'ProductVersion', u'1.0.4'),
            StringStruct(u'Comments', u'作者 Rex Lee    联系邮箱 rexlee@rexleepro.com'),
            StringStruct(u'PrivateBuild', u''),
            StringStruct(u'SpecialBuild', u'')])

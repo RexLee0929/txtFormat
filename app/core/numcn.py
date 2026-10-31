@@ -123,8 +123,4 @@ def mixed_to_int(text: str) -> int | None:
     return None
 
 
-def int_to_chapter_cn(num: int) -> str:
-    return int_to_cn(num)
-
-
-__all__ = ["int_to_cn", "cn_to_int", "mixed_to_int", "int_to_chapter_cn", "CN_DIGITS"]
+__all__ = ["int_to_cn", "cn_to_int", "mixed_to_int", "CN_DIGITS"]

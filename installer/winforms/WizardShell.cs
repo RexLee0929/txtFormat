@@ -48,15 +48,19 @@ namespace TxtFormatSetup
             Font = _uiFont;
             ClientSize = new Size(width, height);
 
-            // 图标是整套配色的唯一种子：先取它，再算 Theme，再画界面
+            // 图标是整套配色的唯一种子：先取它，再算 Theme，再画界面。
+            // ExtractAssociatedIcon 固定只返回 32×32（ico 里有多少帧都一样），
+            // 之前再 new Icon(ico, 256, 256) 等于 32→256→64 两次重采样，
+            // 侧栏 logo 被拉糊了。PrivateExtractIcons 会按请求尺寸挑帧，
+            // 要 256 就拿真 256 帧。取不到再退回老 API 兜底。
             try
             {
-                var ico = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-                if (ico != null)
+                var big = FrameIcon(256);
+                if (big != null)
                 {
-                    Icon = ico;
-                    using (var big = new Icon(ico, 256, 256))
-                        _appIcon = big.ToBitmap();
+                    _appIcon = big.ToBitmap();
+                    big.Dispose();
+                    Icon = FrameIcon(32) ?? Icon.ExtractAssociatedIcon(Application.ExecutablePath);
 
                     Theme.Build(_appIcon);
 
@@ -65,6 +69,36 @@ namespace TxtFormatSetup
                 }
             }
             catch { }
+        }
+
+        // ------------------------------------------------------------------
+        // 品牌图标：PrivateExtractIconsW 按尺寸取 exe 内嵌资源里的帧。
+        // ExtractAssociatedIcon 永远只给 32×32，多帧 ico 也一样。
+        // ------------------------------------------------------------------
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        static extern uint PrivateExtractIconsW(string file, int index, int cx, int cy,
+            IntPtr[] icons, int[] ids, int count, int flags);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        static extern bool DestroyIcon(IntPtr handle);
+
+        /// <summary>按尺寸从自己的 exe 里取一帧图标（自有句柄，用完可 Dispose）；失败返回 null。</summary>
+        static Icon FrameIcon(int size)
+        {
+            try
+            {
+                var h = new IntPtr[1];
+                if (PrivateExtractIconsW(Application.ExecutablePath, 0, size, size, h, null, 1, 0) > 0
+                    && h[0] != IntPtr.Zero)
+                {
+                    var owned = (Icon)Icon.FromHandle(h[0]).Clone();   // 克隆成自有句柄，原句柄销毁
+                    DestroyIcon(h[0]);
+                    return owned;
+                }
+            }
+            catch { }
+            return null;
         }
 
         protected override void OnLoad(EventArgs e)
@@ -244,7 +278,7 @@ namespace TxtFormatSetup
 
             // ---- 底部按钮（先建，再统一交给 LayoutButtons 定位）
             CancelBtn = MakeButton("取消", 0, 0, 86, 28);
-            NextBtn = MakeButton("下一步", 0, 0, 86, 28);
+            NextBtn = MakeButton("下一步", 0, 0, 86, 28, true);
             Back = MakeButton("上一步", 0, 0, 86, 28);
             content.Controls.Add(Back);
             content.Controls.Add(NextBtn);
@@ -276,17 +310,39 @@ namespace TxtFormatSetup
             Back.Location = P(rightEdge - bw - gap - nextWidth - gap - bw, by);
         }
 
-        Button MakeButton(string text, int x, int y, int w, int h)
+        /// <summary>
+        /// 自绘 flat 按钮：白底 + 1px 描边 + hover/pressed 自控，和 MsgDialog 的按钮同一套
+        /// （规范 §二：主按钮 Accent 描边 + Ink 文字，次按钮 Line 描边 + Muted 文字）。
+        /// 之前用 FlatStyle.System，系统主题渲染的按钮和弹窗里的平面按钮是两套观感。
+        /// </summary>
+        Button MakeButton(string text, int x, int y, int w, int h, bool primary = false)
         {
             var b = new Button
             {
                 Text = text,
                 Location = P(x, y),
                 Size = Z(w, h),
-                FlatStyle = FlatStyle.System,
-                Font = _uiFont
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.White,
+                ForeColor = primary ? Theme.Ink : Theme.Muted,
+                Font = _uiFont,
+                UseVisualStyleBackColor = false
             };
+            b.FlatAppearance.BorderSize = 1;
+            b.FlatAppearance.MouseOverBackColor = Theme.HoverBg;
+            b.FlatAppearance.MouseDownBackColor = Theme.SelectBg;
+            // 自绘按钮不会自动画禁用态：置灰逻辑自己接住，否则被禁用的「安装」
+            // 还是强调色描边黑字，看着照样能点（规范 §二：禁用态要自己画）。
+            b.EnabledChanged += delegate { ApplyButtonState(b, primary); };
+            ApplyButtonState(b, primary);
             return b;
+        }
+
+        static void ApplyButtonState(Button b, bool primary)
+        {
+            bool on = b.Enabled;
+            b.ForeColor = on ? (primary ? Theme.Ink : Theme.Muted) : Theme.Dim;
+            b.FlatAppearance.BorderColor = on && primary ? Theme.Accent : Theme.Line;
         }
 
         // ------------------------------------------------------------ 页面构件
@@ -333,6 +389,111 @@ namespace TxtFormatSetup
             Body.Controls.Add(c);
             return c;
         }
+
+        // ------------------------------------------------------------ 两列与逐行累加
+        /// <summary>
+        /// 「标签 + 值」两列一行：标签右对齐成一列，值左对齐并自动折行。
+        /// 返回这一行实际占用的高度（设计像素），调用方累加 y 即可。
+        /// 标签用中性灰（#5C5C5C）而不是浅灰 —— 一整屏浅灰标签基本读不出来。
+        /// </summary>
+        protected int Row(string label, string value, int y)
+        {
+            return Row(label, value, y, Theme.Ink);
+        }
+
+        protected int Row(string label, string value, int y, Color valueColor)
+        {
+            const int LabelW = 88, Gap = 8;
+            const int ValueW = 428 - LabelW - Gap;
+
+            var lb = new Label
+            {
+                Text = label,
+                Location = P(0, y),
+                Size = Z(LabelW, 20),
+                TextAlign = ContentAlignment.MiddleRight,
+                ForeColor = Theme.Muted,
+                BackColor = Color.White
+            };
+            Body.Controls.Add(lb);
+
+            int h = MeasureH(value, ValueW);
+            var vb = new Label
+            {
+                Text = value,
+                Location = P(LabelW + Gap, y),
+                Size = Z(ValueW, h),
+                ForeColor = valueColor,
+                BackColor = Color.White
+            };
+            Body.Controls.Add(vb);
+            return h;
+        }
+
+        /// <summary>
+        /// 按设计宽度实测折行后的高度（设计像素）。Label 的 AutoSize 默认 false，
+        /// 高度算不准就会把长路径的第二行裁掉。
+        /// </summary>
+        protected int MeasureH(string text, int designWidth)
+        {
+            return MeasureH(text, designWidth, Body.Font);
+        }
+
+        protected int MeasureH(string text, int designWidth, Font f)
+        {
+            if (string.IsNullOrEmpty(text)) return 20;
+            int devH = TextRenderer.MeasureText(text, f,
+                new Size(S(designWidth), 0), TextFormatFlags.WordBreak).Height;
+            int h = (int)Math.Ceiling(devH / K);
+            return h < 20 ? 20 : h + 2;      // +2：中文字体实测会吃掉半行行距
+        }
+
+        /// <summary>
+        /// 完成页/说明区逐行累加：返回下一行的 y。**空文本不占位** —— 用固定 y 排版时，
+        /// 没有的那一行会留下一个空洞，看着像漏了内容（规范 §五-3）。
+        /// </summary>
+        protected int Line(string text, int y, int w)
+        {
+            if (string.IsNullOrEmpty(text)) return y;
+            int h = MeasureH(text, w);
+            L(text, 0, y, w, h);
+            return y + h + 4;
+        }
+
+        /// <summary>同上，但按路径处理：固定单行 + 省略号截断 + 悬停看全（规范 §五-3）。</summary>
+        protected int LinePath(string text, int y)
+        {
+            if (string.IsNullOrEmpty(text)) return y;
+            var lbl = L(text, 0, y, 428, 20);
+            lbl.AutoEllipsis = true;
+            var tip = new ToolTip();
+            tip.SetToolTip(lbl, text);
+            return y + 24;
+        }
+
+        /// <summary>
+        /// 完成页的结论行：9.5pt 加粗，让「装好了」一眼看到（规范 §三 完成页）。
+        /// 返回下一行的 y。
+        /// </summary>
+        protected int Head(string text, int y, int w)
+        {
+            if (string.IsNullOrEmpty(text)) return y;
+            var f = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
+            int h = MeasureH(text, w, f);
+            var lbl = new Label
+            {
+                Text = text,
+                Location = P(0, y),
+                Size = Z(w, h),
+                ForeColor = Ink,
+                BackColor = Color.White,
+                Font = f,
+                AutoSize = false
+            };
+            Body.Controls.Add(lbl);
+            return y + h + 6;
+        }
+
 
         protected Button SmallButton(string text, int x, int y, int w, int h)
         {

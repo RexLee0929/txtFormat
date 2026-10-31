@@ -41,7 +41,7 @@ python -m venv .venv
 :: 安装包
 .venv\Scripts\python.exe tools\make_payload.py
 cd installer\winforms && dotnet build -c Release && cd ..\..
-copy installer\winforms\bin\Release\net48\txtFormat-Setup.exe artifacts\txtFormat-1.0.2-setup.exe
+copy installer\winforms\bin\Release\net48\txtFormat-Setup.exe artifacts\txtFormat-1.0.4-setup.exe
 ```
 
 `.cmd` 文件是 GBK 编码的，由 `tools\write_cmd.py` 生成 —— 用 UTF-8 编辑器直接改会在 cmd 窗口里出乱码。
@@ -59,7 +59,7 @@ copy installer\winforms\bin\Release\net48\txtFormat-Setup.exe artifacts\txtForma
 | `build-installer.cmd` | 安装包文件名（`tools\write_cmd.py` 的模板里） |
 
 ```bat
-.venv\Scripts\python.exe tools\check_version.py artifacts\txtFormat\txtFormat.exe artifacts\txtFormat-1.0.2-setup.exe
+.venv\Scripts\python.exe tools\check_version.py artifacts\txtFormat\txtFormat.exe artifacts\txtFormat-1.0.4-setup.exe
 ```
 
 ## 改动范围
@@ -71,6 +71,7 @@ copy installer\winforms\bin\Release\net48\txtFormat-Setup.exe artifacts\txtForma
 | 格式整理的新开关 | 三处：`core/settings.py` 的 `Settings` 字段与默认值、`ui/dialogs.py` 的 `OptionsDialog`（单选组或 `options` 列表）、`core/formatter.py` 里读取它的那一步。改了已有默认值还要加 `settings_version` 迁移，否则老配置读进来仍是旧值 |
 | 新的一类审核 | `core/checkers.py` 注册检查函数、`ui/dialogs.py` 的 `REVIEW_ITEMS` 加一项、决定默认是否勾选 |
 | 新的内置正则 | `core/regexlib_data.py` 追加条目（说明 / 表达式 / 替换），打包自检会验证每一条都能编译 |
+| 自动化的新步骤 | `core/automation.py` 的 `STEP_TYPES` 注册 `StepSpec`（`run` + `summarize`）；带选项的步骤在 `ui/automation.py` 加一个配置小对话框 |
 | 新的转换格式 | `core/convert.py` 的 `CONVERTERS` 加一项（键、扩展名、界面文案、实现），命令栏的「转换」下拉按这张表自动填充，不用改界面 |
 | 命令栏按钮或菜单项 | `ui/main_window.py` 的 `_build_command_bar` / `_build_menus`；图标名必须在 `ui/icons.py` 里存在，否则是空白图标 |
 | 安装/卸载流程 | `installer/winforms/` 下的 `InstallForm.cs`（8 页向导）、`UninstallForm.cs`、`Program.cs`（注册表、快捷方式、解包、清理） |
@@ -81,12 +82,13 @@ copy installer\winforms\bin\Release\net48\txtFormat-Setup.exe artifacts\txtForma
 
 ```
 app/
-  main.py            入口：QApplication、DWM 标题栏、命令行打开文件、--selftest
+  main.py            入口：QApplication、DWM 标题栏、命令行打开文件、单实例互斥
+  selftest.py        打包自检（--selftest / --menutest），按参数懒加载，正常启动不 import
   core/              纯逻辑，无 Qt 依赖，可单独测试
     version.py       版本与作者信息
-    encoding.py      编码与行尾识别、按原样回写
+    encoding.py      编码与行尾识别、按原样回写；decode_first / read_text_any 统一编码探测
     formatter.py     格式整理 11 步
-    punct.py         标点全半角、非法组合、引号规范化
+    punct.py         标点全半角、非法组合（PUNCT_RULES 规则表，审核与整理共用）、引号规范化
     numcn.py         中文数字 ↔ 阿拉伯数字
     chapter.py       章节解析、标题规范化、重排、分割
     splitter.py      按大小/章节分割、合并、批量更名
@@ -95,16 +97,19 @@ app/
     regexlib.py      正则库封装；regexlib_data.py 是内置表达式数据
     convert.py       各格式转 TXT
     zhconv.py        简繁转换（LCMapStringEx）
-    settings.py      选项持久化（程序目录 config.json）
+    automation.py    自动化任务引擎：六种步骤、逐步执行、每步独立配置
+    settings.py      选项持久化（程序目录 config.json，读入时逐项校验）
     paths.py         源码/打包两种环境下的路径解析
   data/              typos.txt / screened.txt / pinyin.txt，可直接编辑扩充
   ui/
     theme.py         设计令牌、全局 QSS、系统强调色
     icons.py         内置 SVG 图标
-    widgets.py       Card / ToggleSwitch / SearchBox / Toast / CopyChip 等
+    widgets.py       Card / Menu（不透明窗口 + setMask 圆角）/ CommandButton / SearchBox / Toast / CopyChip
     editor.py        行号、水线、当前行高亮、自动卷屏、阅读模式
-    panels.py        文件列表面板、串替换面板
+    panels.py        文件列表面板、替换规则面板、自动化面板
     dialogs.py       选项 / 章节分割 / 合并 / 快速审核 / 转到 / 重编码 / 关于
+    automation.py    自动化任务的编辑对话框（AutomationDialog 与各步骤配置小框）
+    task.py          后台 QThread 任务封装（同一时间只允许一个后台任务）
     main_window.py   菜单、命令栏、三栏布局、业务编排
 installer/
   version.props      版本与作者信息的唯一来源
@@ -118,17 +123,17 @@ tools/               图标、载荷、截图、同步、版本校验、端到�
 - 图标全部是 `ui/icons.py` 里的内联 SVG，按 16px 与 20px 两档取用，换色靠传参，不依赖图片文件。
   `app/assets/app.ico` 由 `tools/make_icon.py` 现场生成（多尺寸），别手工替换。
 - 配色集中在 `ui/theme.py` 的 `Color` 与 `ACCENT`：窗口底色、卡片、描边、三级文字色。
-  强调色启动时读系统设置（`HKCU\Software\Microsoft\Windows\DWM\AccentColor`），所以截图里的主按钮颜色
-  会随本机主题变；写文档时别把某个具体颜色写死。
+  **强调色由程序图标派生**（`core/accent.py` 读 `app.ico` 主色的 H/S，按规范 §三 的公式算四个用途色），
+  所以换图标整套界面跟着换；截图里的主按钮颜色会随图标变，写文档时别把某个具体颜色写死。
 - 标题栏走 DWM：圆角 33、边框 34、标题底色 35、标题文字 36、纯色背景 38，取值都来自 `Color`。
   DWM 用的是 `COLORREF`（`0x00BBGGRR`），不是 RGB，顺序写反会得到互补色。
 
 ## 界面怎么验证
 
 ```bat
-.venv\Scripts\python.exe tests\test_core.py          :: 87 项：编码、数字、标点、正则、章节、整理、检查、分割、简繁
+.venv\Scripts\python.exe tests\test_core.py          :: 107 项：编码、数字、标点、正则、章节、整理、检查、分割、简繁、自动化
 set QT_QPA_PLATFORM=offscreen
-.venv\Scripts\python.exe tests\test_ui.py            :: 41 项：打开→整理→查找→替换→保存→章节→审核→阅读模式
+.venv\Scripts\python.exe tests\test_ui.py            :: 83 项：打开→整理→查找→替换→保存→章节→审核→阅读模式→弹层圆角→自动化面板
 ```
 
 截图按需生成，产物只留在本机 `docs\`（不进发布区）：
@@ -146,10 +151,11 @@ artifacts\txtFormat\txtFormat.exe --selftest %TEMP%\tfself
 ```
 
 安装包做端到端验证：静默安装 → 检查文件、快捷方式、注册表 → 从安装目录跑自检 → 静默卸载 →
-确认目录、开始菜单项、`App Paths` 与卸载登记键都已清理。
+确认目录、开始菜单项、`App Paths` 与卸载登记键都已清理。脚本不写死版本号：
+期望版本从 `app\core\version.py` 动态读（`expect_version()`），升版本不用改它。
 
 ```bat
-.venv\Scripts\python.exe tools\e2e_installer.py artifacts\txtFormat-1.0.2-setup.exe
+.venv\Scripts\python.exe tools\e2e_installer.py artifacts\txtFormat-1.0.4-setup.exe
 ```
 
 ## 坑
@@ -168,10 +174,28 @@ artifacts\txtFormat\txtFormat.exe --selftest %TEMP%\tfself
   按原始字节写出（`ResourceBytes`），不做任何转码。
 - **许可协议页文字糊成一片**：内嵌的 `LICENSE` 是 LF 行尾，WinForms 的 `TextBox` 只认 CRLF。对策：读进来先
   `ToCrlf` 再显示。
+- **安装向导侧栏图标发虚**：`Icon.ExtractAssociatedIcon` 固定返回 32×32（ico 里有大帧也拿不到），
+  再 `new Icon(ico, 256, 256)` 等于 32→256→64 两次重采样，细线条 logo 被拉糊。对策：`PrivateExtractIconsW`
+  按请求尺寸直接挑真帧（要 256 就拿真 256），取不到再退回老 API（`WizardShell.FrameIcon`）。
 - **长文案的按钮折成两行**：向导按钮宽度默认按两字算，「结束进程并继续卸载」放不下。对策：切页时调
   `LayoutButtons(宽度)` 按该页最长文案加宽。
 - **卸载最后一步删不掉 `uninstall.exe`**：卸载程序自己就是那个文件，父进程还占着句柄。对策：先把自身复制到
   临时目录再启动，由副本删原目录。
+- **整篇替换后 Ctrl+Z 撤不回去、光标跳走**：`setPlainText` 会清空撤消栈。对策：全文替换统一走
+  `_replace_document_text()`，用 QTextCursor 编辑块整篇替换，撤销栈与光标位置都保留。
+- **`QFontDialog.getFont()` 解包崩（`'bool' object has no attribute 'family'`）**：PySide6 的静态方法返回值
+  与 PyQt 顺序不同，且选点阵字体时字号可能返回 -1。对策：实例化 `QFontDialog` + `DontUseNativeDialog`，
+  自己判断返回值。
+- **菜单弹层四角发黑、底部一条暗线**：`WA_TranslucentBackground` 的半透明像素在 DPR 除不尽时被 DWM
+  混成暗色。对策：弹层窗口完全不透明（palette 底色 = 卡片白）+ `setMask` 圆角裁切 + paintEvent 先整面
+  `fillRect` 画实，别用半透明背景方案。
+- **换图标后被 `build.cmd` 覆盖回旧图标**：`tools/make_icon.py` 原来在构建期用 Qt 现画图标，
+  手工换上去的新 logo 一跑构建就被覆盖。对策：图标唯一来源改为品牌管线（`brand/export/<程序>/`），
+  `make_icon.py` 只做搬运（命令行参数 > 环境变量 `BRAND_EXPORT_DIR` > 相对仓库探测），
+  不再在构建期画图。
+- **端到端脚本里写死版本号**：换版本必漏 —— 1.0.2 时代 `e2e_installer.py` 里两处 `== "1.0.2"` 断言都是
+  靠人肉改的。对策：`expect_version()` 按文件路径加载 `app\core\version.py` 拿 `APP_VERSION`，
+  断言全部写成 `== ver_expect`。
 - **`.cmd` 里中文变问号**：用 UTF-8 存批处理，cmd 按 GBK 读就乱。对策：`tools\write_cmd.py` 以 GBK + CRLF 写出。
 - **同步过去的东西少了几个文件，且不报错**：`sync_to_code.py` 的白名单是硬编码的，新文件没进列表永远同步不过去。
   对策：加完先跑一次预演，确认目标文件出现在计划里。

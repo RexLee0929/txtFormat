@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-import ctypes
+import importlib.util
 import os
 import subprocess
 import sys
@@ -13,6 +13,22 @@ import winreg
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def expect_version() -> str:
+    """版本唯一来源：app/core/version.py 的 APP_VERSION。
+
+    不在脚本里写死版本号 —— 写死必漏（1.0.2 时代这里漏过两处断言）。
+    直接按文件路径加载 version.py，不经过 app 包的 __init__，避免拖进 UI 依赖。
+    """
+    p = os.path.join(ROOT, "app", "core", "version.py")
+    spec = importlib.util.spec_from_file_location("tf_version", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.APP_VERSION
+
 
 PASS = 0
 FAIL = 0
@@ -36,7 +52,9 @@ def localappdata() -> str:
 
 def main() -> int:
     setup = os.path.abspath(sys.argv[1])
+    ver_expect = expect_version()
     print(f"安装包：{setup}  ({os.path.getsize(setup) // 1024 // 1024} MB)")
+    print(f"期望版本（读自 app/core/version.py）：{ver_expect}")
 
     # 默认是「仅为我安装」→ %LOCALAPPDATA%\Programs\txtFormat
     target = os.path.join(localappdata(), "Programs", "txtFormat")
@@ -81,7 +99,7 @@ def main() -> int:
             pub = winreg.QueryValueEx(k, "Publisher")[0]
             contact = winreg.QueryValueEx(k, "Contact")[0]
         print(f"注册表：{disp} / {ver} / {pub} / {contact}")
-        check("注册表 DisplayVersion = 1.0.2", ver == "1.0.2", ver)
+        check(f"注册表 DisplayVersion = {ver_expect}", ver == ver_expect, ver)
         check("注册表 Publisher = Rex Lee", pub == "Rex Lee", pub)
         check("注册表 Contact = 邮箱", contact == "rexlee@rexleepro.com", contact)
     except OSError as exc:
@@ -116,7 +134,7 @@ def main() -> int:
         import shutil
         shutil.rmtree(out_dir, ignore_errors=True)
     os.makedirs(out_dir, exist_ok=True)
-    st = subprocess.run([exe, "--selftest", out_dir], capture_output=True,
+    subprocess.run([exe, "--selftest", out_dir], capture_output=True,
                         text=True, timeout=300, encoding="utf-8", errors="replace")
     report_path = os.path.join(out_dir, "selftest.json")
     check("自检报告已生成", os.path.isfile(report_path), report_path)
@@ -129,7 +147,7 @@ def main() -> int:
             mark = "OK  " if c["ok"] else "FAIL"
             print(f"  [{mark}] {c['name']}  {c['detail'][:90]}")
     check("自检全部通过", bool(report.get("ok")), str(report.get("checks"))[:300])
-    check("自检版本 1.0.2", report.get("version") == "1.0.2", str(report.get("version")))
+    check(f"自检版本 = {ver_expect}", report.get("version") == ver_expect, str(report.get("version")))
 
     # 规范 §三.2：程序首次运行就要落盘一份默认 config.json（让安装器的配置检测成立）。
     # 自检跑过 = 窗口建过 = MainWindow.__init__ 执行过 ensure_default()。

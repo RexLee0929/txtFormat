@@ -13,6 +13,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
+from . import encoding as enc
 from .paths import find_user_file, root_dir
 from .regexlib_data import BUILTIN, SEMI_CUSTOM, RegexEntry
 
@@ -169,16 +170,8 @@ def _as_dict(entry) -> dict:
 
 def _read_triples(path: str) -> list[tuple[str, str, str]]:
     """读取“说明 / 表达式 / 替换”三行一组的自定义正则文件。"""
-    if not os.path.exists(path):
-        return []
-    for codec in ("utf-8-sig", "gb18030", "utf-16"):
-        try:
-            with open(path, "r", encoding=codec) as fh:
-                raw = fh.read()
-            break
-        except (UnicodeDecodeError, UnicodeError):
-            continue
-    else:
+    raw = enc.read_text_any(path, ("utf-8-sig", "gb18030", "utf-16"))
+    if raw is None:
         return []
     lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     out: list[tuple[str, str, str]] = []

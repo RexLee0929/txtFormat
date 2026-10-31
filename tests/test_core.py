@@ -219,9 +219,94 @@ def test_zhconv() -> None:
     eq("繁转简", zhconv.to_simplified(t), s)
 
 
+# ------------------------------------------------------------------ 自动化
+def test_automation() -> None:
+    from app.core import automation
+
+    text = "第1章 开端\n　　他说,你好。\n  尾随空格  \n"
+
+    # ---- 各类步骤单独执行
+    new, notes = automation.run_automation(text, [
+        {"type": "rstrip", "config": {}},
+    ])
+    check("自动化-去行尾空格", "尾随空格  " not in new and "尾随空格" in new, new)
+    check("自动化-说明含步骤名", any("去除行尾空格" in n for n in notes), str(notes))
+
+    new, notes = automation.run_automation(text, [
+        {"type": "replace", "config": {"pattern": "你好", "replacement": "您好",
+                                       "use_regex": False, "ignore_case": False}},
+    ])
+    eq("自动化-普通替换", "您好" in new, True)
+    check("自动化-替换计数", any("1 处" in n for n in notes), str(notes))
+
+    new, _ = automation.run_automation(text, [
+        {"type": "replace", "config": {"pattern": r"第(\d+)章", "replacement": "第$1回",
+                                       "use_regex": True, "ignore_case": False}},
+    ])
+    check("自动化-正则替换与反引用", "第1回" in new, new)
+
+    new, notes = automation.run_automation(text, [
+        {"type": "replace", "config": {"pattern": "", "replacement": "x"}},
+    ])
+    eq("自动化-空查找跳过不改文", new, text)
+    check("自动化-空查找有说明", any("跳过" in n for n in notes), str(notes))
+
+    new, _ = automation.run_automation(text, [
+        {"type": "zhconv", "config": {"mode": "s2t"}},
+    ])
+    check("自动化-简转繁", "說" in new and "開端" in new, new)
+
+    # ---- 步骤配置独立于程序 Settings：改步骤选项不影响传入对象
+    program_settings = Settings()
+    program_settings.punct_mode = "keep"
+    snapshot = dict(automation.STEP_TYPES["format"].default_config)
+    snapshot["punct_mode"] = "full"
+    new, _ = automation.run_automation(text, [{"type": "format", "config": snapshot}])
+    check("自动化-格式整理按步骤配置执行", "，" in new, new)
+    eq("自动化-不改动程序配置", program_settings.punct_mode, "keep")
+    eq("自动化-不改全局默认", Settings().punct_mode, "full")
+
+    # 同一功能出现两次、配置不同（用户明确要求的场景）
+    two_format = [
+        {"type": "format", "config": {**snapshot, "punct_mode": "full"}},
+        {"type": "replace", "config": {"pattern": "a", "replacement": "b", "use_regex": False}},
+        {"type": "format", "config": {**snapshot, "punct_mode": "half"}},
+    ]
+    new, notes = automation.run_automation(text, two_format)
+    eq("自动化-步骤数", len(notes), 3)
+
+    # ---- 容错：未知类型 / 坏正则不炸、不中断
+    new, notes = automation.run_automation(text, [
+        {"type": "nope", "config": {}},
+        {"type": "replace", "config": {"pattern": "([bad", "replacement": "",
+                                       "use_regex": True, "ignore_case": False}},
+        {"type": "rstrip", "config": {}},
+    ])
+    check("自动化-未知步骤说明", any("未知" in n for n in notes), str(notes))
+    check("自动化-坏正则说明", any("正则有误" in n for n in notes), str(notes))
+    check("自动化-后续步骤仍执行", any("去除行尾空格" in n for n in notes), str(notes))
+
+    # ---- normalize_automations 清洗
+    tasks = automation.normalize_automations([
+        {"name": "好任务", "steps": [{"type": "rstrip"}, {"type": "bad", "config": None},
+                                    {"type": "format", "config": {"punct_mode": "full"}}]},
+        "垃圾",
+        {"name": ""},
+        {"name": "好任务", "steps": []},
+        {"name": "无步骤字段", "steps": "x"},
+    ])
+    eq("自动化-清洗后数量", len(tasks), 2)
+    eq("自动化-清洗保留合法步骤", tasks[0]["steps"],
+       [{"type": "rstrip", "config": {}}, {"type": "format", "config": {"punct_mode": "full"}}])
+    eq("自动化-重名去重", tasks[1]["name"], "无步骤字段")
+    eq("自动化-坏数据整体", automation.normalize_automations("x"), [])
+    eq("自动化-坏数据整体2", automation.normalize_automations(None), [])
+
+
 def main() -> int:
     for fn in (test_encoding, test_numcn, test_punct, test_regexlib, test_chapter,
-               test_formatter, test_checkers, test_adfilter, test_splitter, test_zhconv):
+               test_formatter, test_checkers, test_adfilter, test_splitter, test_zhconv,
+               test_automation):
         try:
             fn()
         except Exception as exc:                        # noqa: BLE001

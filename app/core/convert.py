@@ -82,15 +82,10 @@ def html_to_text(markup: str) -> str:
 
 
 def convert_html(path: str) -> ConvertResult:
-    raw = open(path, "rb").read()
-    for codec in ("utf-8", "gb18030", "utf-16"):
-        try:
-            markup = raw.decode(codec)
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        markup = raw.decode("gb18030", errors="replace")
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    markup = enc.decode_first(raw, ("utf-8", "gb18030", "utf-16")) \
+        or raw.decode("gb18030", errors="replace")
     text = html_to_text(markup)
     out = _out_path(path, ".txt")
     enc.save_text(out, text, "gb18030")
@@ -206,14 +201,8 @@ def convert_pdb(path: str) -> ConvertResult:
         rec = data[offsets[i]:offsets[i + 1]]
         chunks.append(rec if compression == 1 else _palmdoc_decompress(rec))
     raw = b"".join(chunks)[:text_len]
-    for codec in ("utf-8", "gb18030", "big5"):
-        try:
-            text = raw.decode(codec)
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        text = raw.decode("gb18030", errors="replace")
+    text = enc.decode_first(raw, ("utf-8", "gb18030", "big5")) \
+        or raw.decode("gb18030", errors="replace")
     text = text.replace("\r\n", "\n").strip() + "\n"
     out = _out_path(path, ".txt")
     enc.save_text(out, text, "gb18030")
@@ -231,13 +220,8 @@ def convert_jar(path: str) -> ConvertResult:
         parts: list[str] = []
         for name in entries:
             raw = zf.read(name)
-            for codec in ("utf-8", "gb18030"):
-                try:
-                    body = raw.decode(codec)
-                    break
-                except UnicodeDecodeError:
-                    continue
-            else:
+            body = enc.decode_first(raw)
+            if body is None:
                 continue
             if name.lower().endswith((".html", ".htm")):
                 body = html_to_text(body)
@@ -264,7 +248,8 @@ def convert_chm(path: str) -> ConvertResult:
 
 # --------------------------------------------------------------- RTF
 def convert_rtf(path: str) -> ConvertResult:
-    raw = open(path, "rb").read().decode("latin-1")
+    with open(path, "rb") as fh:
+        raw = fh.read().decode("latin-1")
     text = raw
     text = re.sub(r"\\'([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), text)
     text = re.sub(r"\\u(-?\d+)\??", lambda m: chr(int(m.group(1)) % 65536), text)

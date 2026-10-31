@@ -6,6 +6,7 @@ using System.IO.Compression;
 using System.Reflection;
 using System.Security.Principal;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -167,7 +168,8 @@ namespace TxtFormatSetup
         // ------------------------------------------------------------ 安装范围
         public static InstallMode Mode = InstallMode.PerUser;
 
-        public static bool IsAllUsers { get { return Mode == InstallMode.AllUsers; } }
+        /// <summary>提权重启后从第几页接着走（--resume=N，0 或未给表示正常从头开始）。</summary>
+        public static int ResumePage;
 
         static bool? _elevated;
 
@@ -222,6 +224,8 @@ namespace TxtFormatSetup
         /// 安装目录里用户可改的自定义正则文件。txtFormat 用它装自定义正则示例，
         /// 用户通常会自己往里加条目 —— 升级时默认不动它（规范 §三.2）。
         /// </summary>
+        /// <summary>自定义正则 / 词表文件（custreg.txt）的完整路径 —— **不是**设置文件，
+        /// 设置文件走 <see cref="SettingsPathIn"/>。</summary>
         public static string ConfigPathIn(string dir) { return Path.Combine(dir, CustRegName); }
 
         /// <summary>安装目录里的设置文件（程序本体按规范 §十 写在 exe 同目录）。</summary>
@@ -246,6 +250,26 @@ namespace TxtFormatSetup
                        && dir.StartsWith(pf, StringComparison.OrdinalIgnoreCase);
             }
             catch { return false; }
+        }
+
+        /// <summary>
+        /// 本机装在**别处**的那一份：已装位置与 <paramref name="dir"/> 不同才返回路径。
+        /// 给「选择安装位置」页用 —— 已装过、这次又换了安装模式时，不能让页面看着像首次安装。
+        /// </summary>
+        public static string OtherInstalledDir(string dir)
+        {
+            try
+            {
+                var installed = InstalledDir();
+                if (string.IsNullOrEmpty(installed)) return null;
+                if (!string.IsNullOrEmpty(dir) && Path.IsPathRooted(dir)
+                    && string.Equals(Path.GetFullPath(installed).TrimEnd('\\'),
+                                     Path.GetFullPath(dir).TrimEnd('\\'),
+                                     StringComparison.OrdinalIgnoreCase))
+                    return null;
+                return Directory.Exists(installed) ? installed : null;
+            }
+            catch { return null; }
         }
 
         // ------------------------------------------------------------ 用户数据目录
@@ -386,24 +410,33 @@ namespace TxtFormatSetup
             catch { }
         }
 
+        /// <summary>
+        /// 注册表要扫的两个视图（规范 §五：旧版本可能写在 32 位视图里，
+        /// 只清 64 位会在「设置 → 应用」里留一条删不掉的登记项）。
+        /// </summary>
+        static readonly RegistryView[] Views =
+        {
+            RegistryView.Registry64,
+            RegistryView.Registry32,
+        };
+
         static void RemoveAppPaths()
         {
             foreach (var all in new[] { true, false })
             {
-                try
+                foreach (var view in Views)
                 {
-                    var hive = all ? RegistryHive.LocalMachine : RegistryHive.CurrentUser;
-                    var view = (all && Environment.Is64BitOperatingSystem)
-                        ? RegistryView.Registry64
-                        : RegistryView.Default;
-
-                    using (var root = RegistryKey.OpenBaseKey(hive, view))
+                    try
                     {
-                        if (root.OpenSubKey(AppPathsSubKey) != null)
-                            root.DeleteSubKeyTree(AppPathsSubKey, false);
+                        var hive = all ? RegistryHive.LocalMachine : RegistryHive.CurrentUser;
+                        using (var root = RegistryKey.OpenBaseKey(hive, view))
+                        {
+                            if (root.OpenSubKey(AppPathsSubKey) != null)
+                                root.DeleteSubKeyTree(AppPathsSubKey, false);
+                        }
                     }
+                    catch { }
                 }
-                catch { }
             }
         }
 
@@ -411,20 +444,19 @@ namespace TxtFormatSetup
         {
             foreach (var all in new[] { true, false })
             {
-                try
+                foreach (var view in Views)
                 {
-                    var hive = all ? RegistryHive.LocalMachine : RegistryHive.CurrentUser;
-                    var view = (all && Environment.Is64BitOperatingSystem)
-                        ? RegistryView.Registry64
-                        : RegistryView.Default;
-
-                    using (var root = RegistryKey.OpenBaseKey(hive, view))
+                    try
                     {
-                        if (root.OpenSubKey(UninstallSubKey) != null)
-                            root.DeleteSubKeyTree(UninstallSubKey, false);
+                        var hive = all ? RegistryHive.LocalMachine : RegistryHive.CurrentUser;
+                        using (var root = RegistryKey.OpenBaseKey(hive, view))
+                        {
+                            if (root.OpenSubKey(UninstallSubKey) != null)
+                                root.DeleteSubKeyTree(UninstallSubKey, false);
+                        }
                     }
+                    catch { }
                 }
-                catch { }
             }
         }
 
@@ -455,6 +487,17 @@ namespace TxtFormatSetup
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
+            // 未捕获异常：自绘对话框兜住（规范 §二.1 —— 只能弹的场景用自绘，
+            // 且一律不响提示音）。挂上以后任何界面异常都不会静默闪退。
+            Application.ThreadException += delegate (object s, ThreadExceptionEventArgs e)
+            {
+                ShowFatal(e.Exception);
+            };
+            AppDomain.CurrentDomain.UnhandledException += delegate (object s, UnhandledExceptionEventArgs e)
+            {
+                ShowFatal(e.ExceptionObject as Exception);
+            };
+
             // 卸载：先复制到临时目录，再从临时目录执行，才能真正删掉安装目录
             int runIdx = Array.IndexOf(args, "--uninstall-run");
             if (runIdx >= 0 && args.Length > runIdx + 1)
@@ -463,15 +506,16 @@ namespace TxtFormatSetup
                 // 静默卸载：/S、--silent 或 --quiet 都认，用于「设置 → 应用」的静默卸载与自动化验证
                 if (HasFlag(args, "--silent") || HasFlag(args, "/S") || HasFlag(args, "--quiet"))
                 {
+                    int code = 0;
                     try
                     {
                         RemoveAll(targetDir, true, null);   // 静默卸载保留个人设置
-                        // 静默路径下父进程在 WaitForExit 期间一直占着自己的 uninstall.exe，
-                        // 所以本地 exe 与临时副本都要等父进程退出后再由 cmd 清掉
-                        ScheduleCleanup(targetDir);
-                        Environment.Exit(0);
                     }
-                    catch { Environment.Exit(1); }
+                    catch { code = 1; }                     // 仍被占用 / 有残留：退出码照实报
+                    // 成功才连安装目录里的 uninstall.exe 一起清；失败必须保住它，
+                    // 否则用户卸不掉、也没有卸不载入口了（e2e 实测踩过）。
+                    ScheduleCleanup(targetDir, code == 0);
+                    Environment.Exit(code);
                     return;
                 }
                 Application.Run(new UninstallForm(targetDir));
@@ -491,6 +535,14 @@ namespace TxtFormatSetup
             // 提权重启后的实例：安装范围已经确定
             if (Array.IndexOf(args, "--all-users") >= 0) Mode = InstallMode.AllUsers;
 
+            // 提权重启后接着走（--resume=N）：用户刚选完模式，不该再从欢迎页点一遍
+            foreach (var a in args)
+                if (a.StartsWith("--resume=", StringComparison.Ordinal))
+                {
+                    int page;
+                    if (int.TryParse(a.Substring("--resume=".Length), out page)) ResumePage = page;
+                }
+
             if (args.Length > 0 && args[0] == "--silent")
             {
                 try
@@ -503,6 +555,55 @@ namespace TxtFormatSetup
             }
 
             Application.Run(new InstallForm());
+        }
+
+        /// <summary>未捕获异常的统一出口：写临时日志 + 自绘错误框（带「打开日志」），不发声（规范 §二.1）。</summary>
+        static void ShowFatal(Exception ex)
+        {
+            // 1) 日志：%TEMP%\<AppId>-setup-error.log，带版本号和时间戳，用户可整份反馈
+            string log = null;
+            try
+            {
+                log = Path.Combine(Path.GetTempPath(), AppId + "-setup-error.log");
+                File.AppendAllText(log,
+                    "---- " + DateTime.Now + "  v" + Version + Environment.NewLine
+                    + (ex == null ? "(未知异常)" : ex.ToString())
+                    + Environment.NewLine + Environment.NewLine);
+            }
+            catch { log = null; }   // 写失败要改口（正文不能再承诺有日志）
+
+            // 2) owner：有向导就挂在它上面，居中在向导而不是屏幕
+            Form owner = null;
+            try { if (Application.OpenForms.Count > 0) owner = Application.OpenForms[0]; } catch { }
+
+            // 3) UnhandledException 跟着崩溃线程走，工作线程上直接建窗不可靠；
+            //    同步切回 UI 线程再弹 —— BeginInvoke 异步排队在 CLR 终止进程时
+            //    可能来不及跑，错误框就永远不出现（规范 §二.1）。
+            if (owner != null && owner.InvokeRequired)
+            {
+                try
+                {
+                    owner.Invoke(new Action(delegate { ShowFatalOnUi(owner, log); }));
+                    return;
+                }
+                catch { }    // 窗口正在销毁等竞态：退回直接弹
+            }
+            ShowFatalOnUi(owner, log);
+        }
+
+        static void ShowFatalOnUi(IWin32Window owner, string log)
+        {
+            try
+            {
+                MsgDialog.Error(owner,
+                    log == null
+                        ? "安装程序遇到没有预料到的问题，可能无法继续。\r\n\r\n"
+                          + "详细信息未能写入日志文件，请把上述情况反馈给作者。"
+                        : "安装程序遇到没有预料到的问题，可能无法继续。\r\n\r\n"
+                          + "详细信息已写入日志文件，可以点「打开日志」查看。",
+                    log);
+            }
+            catch { }
         }
 
         // ------------------------------------------------------------ 提权
@@ -556,8 +657,11 @@ namespace TxtFormatSetup
             }
             catch (Exception ex)
             {
-                MessageBox.Show("无法启动卸载程序：\n" + ex.Message, AppName,
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                // 规范 §二.1：自绘对话框（无系统图标、不发声）。
+                // 这里没有 owner —— 卸载器是独立进程，弹在屏幕中间。
+                MsgDialog.Info(null,
+                    "无法启动卸载程序：\n" + ex.Message
+                    + "\n\n可以手动到安装目录里运行 uninstall.exe。");
             }
         }
 
@@ -576,6 +680,13 @@ namespace TxtFormatSetup
                                      bool startMenuShortcut, bool resetConfig,
                                      Action<int, string> progress)
         {
+            // 点「安装」时的预检到这里之间有时间差（解压、弹进度页都要几秒），
+            // 用户完全可能在这期间又把程序打开。页面层已经按「先问再杀」征得同意，
+            // 这里**只复查、绝不静默杀**：非空抛出去让向导切回「正在运行」页，
+            // 由用户再决定一次（规范 §三.1 第 7 点，与卸载侧 RemoveAll 同款）。
+            if (RunningInstances(dir).Length > 0)
+                throw new StillRunningException();
+
             Directory.CreateDirectory(dir);
 
             var asm = Assembly.GetExecutingAssembly();
@@ -607,7 +718,7 @@ namespace TxtFormatSetup
                 }
             }
 
-            // 使用说明随程序一起装进去，完成页可以勾选查看
+            // 使用说明随程序一起装进去（用户可自己在安装目录打开；完成页不再放对应复选框）
             try
             {
                 File.WriteAllText(ReadmePathIn(dir), Readme, new UTF8Encoding(false));
@@ -685,10 +796,43 @@ namespace TxtFormatSetup
         }
 
         // ------------------------------------------------------------ 卸载
+        /// <summary>卸载开始时发现目标程序又在运行 —— 向导据此切回占用页，而不是当失败处理。</summary>
+        public class StillRunningException : Exception { }
+
+        /// <summary>
+        /// 卸载后复查：安装目录里还剩多少文件（keepConfig 时不算保留下来的用户设置）。
+        /// 逐文件 TryDelete 会吞掉占用/权限导致的失败，不能凭它报「已移除」——
+        /// 完成页必须先核实目录（规范 §五 3b）。
+        /// </summary>
+        public static int RemainingFiles(string dir, bool keepConfig)
+        {
+            try
+            {
+                if (!Directory.Exists(dir)) return 0;
+                int n = 0;
+                foreach (var f in Directory.GetFiles(dir, "*", SearchOption.AllDirectories))
+                {
+                    if (keepConfig && IsUserConfigFile(Path.GetFileName(f))) continue;
+                    // 卸载器自己的 exe 不算残留：它可能正被父进程占用，
+                    // 由 Program.ScheduleCleanup 在进程退出后删。
+                    if (Path.GetFileName(f).Equals("uninstall.exe", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    n++;
+                }
+                return n;
+            }
+            catch { return 1; }   // 读不了也算「有残留」，宁可不报成功
+        }
+
         /// <summary>清理安装痕迹，返回删除的文件数。keepConfig 为 true 时保留个人设置。</summary>
         public static int RemoveAll(string dir, bool keepConfig, Action<int, string> progress)
         {
-            KillRunning(dir);
+            // 占用进程不在这里杀：页面层已经按规范「先问再杀」（点卸载时检测 → 占用页
+            // 由用户决定）。走到这里还活着，只能是检查之后到动手之前新启动的 ——
+            // 静默杀等于替用户做了决定（规范 §三.1 第 7 点 / §五）。
+            // 抛出去让向导切回占用页，用户自己决定要不要结束它。
+            if (RunningInstances(dir).Length > 0)
+                throw new StillRunningException();
 
             const int Steps = 4;
             int step = 0;
@@ -719,6 +863,16 @@ namespace TxtFormatSetup
                 {
                     if (keepConfig && IsUserConfigFile(Path.GetFileName(f))) continue;
                     if (TryDelete(f)) removed++;
+                }
+
+                // 卸载器自己的 exe 常常正被父进程占用：多试几次，仍不行就交给
+                // ScheduleCleanup 在进程退出后删（不算残留）。
+                var selfExe = Path.Combine(dir, "uninstall.exe");
+                for (int i = 0; i < 5 && File.Exists(selfExe); i++)
+                {
+                    TryDelete(selfExe);
+                    if (!File.Exists(selfExe)) break;
+                    Thread.Sleep(120);
                 }
 
                 var dirs = Directory.GetDirectories(dir, "*", SearchOption.AllDirectories);
@@ -777,6 +931,32 @@ namespace TxtFormatSetup
                 return names.Count == 0 ? "（未发现个人设置）" : string.Join("、", names.ToArray());
             }
             catch { return "（无法读取）"; }
+        }
+
+        /// <summary>
+        /// 保留的配置文件的**完整地址**（完成页单独一行显示，过长用省略号截断）。
+        /// 与 KeptConfigFiles 的清单一一对应，只是换成完整路径，别让用户自己拼目录。
+        /// </summary>
+        public static string KeptConfigPaths(string dir)
+        {
+            try
+            {
+                var paths = new List<string>();
+                var settings = SettingsPathIn(dir);
+                if (File.Exists(settings)) paths.Add(settings);
+                var custReg = ConfigPathIn(dir);
+                if (File.Exists(custReg)) paths.Add(custReg);
+                var custErr = Path.Combine(dir, "custerr.txt");
+                if (File.Exists(custErr)) paths.Add(custErr);
+
+                // 旧版把设置放在 %APPDATA%\txtFormat，卸载时不动它，这里也如实列出来
+                if (Directory.Exists(DataDir))
+                    foreach (var f in Directory.GetFiles(DataDir, "*", SearchOption.TopDirectoryOnly))
+                        if (IsUserConfigFile(Path.GetFileName(f))) paths.Add(f);
+
+                return string.Join("、", paths.ToArray());
+            }
+            catch { return ""; }
         }
 
         static bool TryDelete(string path)
@@ -872,16 +1052,22 @@ namespace TxtFormatSetup
         /// 静默卸载收尾：本进程占着临时副本，无法自删；交给一个稍后启动的 cmd
         /// 在父进程退出后清掉临时副本、安装目录里残留的 uninstall.exe 与空目录。
         /// </summary>
-        public static void ScheduleCleanup(string dir)
+        /// <param name="removeInstall">
+        /// true（默认）= 卸载成功：临时副本、安装目录里的 uninstall.exe 与空目录都删掉；
+        /// false = 卸载失败（程序还在运行 / 有残留）：**必须保住安装目录里的 uninstall.exe**，
+        /// 否则用户既卸不掉也找不到卸载入口了，只能重装一次。临时副本照旧删。
+        /// </param>
+        public static void ScheduleCleanup(string dir, bool removeInstall = true)
         {
             try
             {
                 var self = Application.ExecutablePath;              // 临时目录里的副本
                 var localExe = Path.Combine(dir, "uninstall.exe");  // 安装目录里的本体
                 var cmd = "/c timeout /t 3 >nul"
-                          + " & del /f /q \"" + self + "\""
-                          + " & del /f /q \"" + localExe + "\""
-                          + " & rmdir \"" + dir + "\"";
+                          + " & del /f /q \"" + self + "\"";
+                if (removeInstall)
+                    cmd += " & del /f /q \"" + localExe + "\""
+                           + " & rmdir \"" + dir + "\"";
 
                 Process.Start(new ProcessStartInfo("cmd.exe", cmd)
                 {
@@ -896,16 +1082,6 @@ namespace TxtFormatSetup
         public static void Launch(string dir)
         {
             try { Process.Start(ExePathIn(dir)); } catch { }
-        }
-
-        public static void OpenReadme(string dir)
-        {
-            try
-            {
-                var p = ReadmePathIn(dir);
-                if (File.Exists(p)) Process.Start(new ProcessStartInfo(p) { UseShellExecute = true });
-            }
-            catch { }
         }
 
         // ------------------------------------------------------------ 内嵌文本

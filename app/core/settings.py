@@ -18,6 +18,61 @@ def _legacy_path() -> str:
 # 设置与程序放在一起（规范 §十：exe 同目录 = config.json）。
 SETTINGS_PATH = os.path.join(root_dir(), "config.json")
 
+#: 字符串型选项的合法取值。坏配置里塞个 ``"FULL"`` / ``"yes"`` 时，
+#: 代码里的 ``if mode == "full"`` 会静默走 default 分支 —— 功能看着"没反应"。
+_CHOICES: dict[str, tuple[str, ...]] = {
+    "punct_mode": ("full", "half", "keep"),
+    "english_mode": ("full", "half", "keep"),
+    "number_mode": ("full", "half", "keep"),
+    "para_spacing": ("blank", "none", "keep"),
+    "indent_kind": ("half", "full", "tab", "none"),
+    "save_encoding": ("utf-8", "utf-8-sig", "gb18030", "big5", "utf-16"),
+    "newline": ("\r\n", "\n", "\r"),
+}
+
+#: 数值型选项的合理区间（越界一律夹到边界，而不是整项丢弃）。
+_RANGES: dict[str, tuple[int, int]] = {
+    "indent_count": (1, 8),
+    "hard_return_width": (10, 500),
+    "check_level": (1, 3),
+    "font_size": (7, 72),
+    "line_height_percent": (100, 300),
+    "settings_version": (1, 99),
+}
+
+
+def _as_int(value: object) -> int | None:
+    """宽容地取整数：接受 int / 整数值的 float / 数字字符串；bool 不算。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lstrip("+-").isdigit():
+            return int(text)
+    return None
+
+
+def _coerce(name: str, value: object, default: object) -> object:
+    """把配置里读到的值校验成与默认值同类型；不合格就退回默认值。"""
+    choices = _CHOICES.get(name)
+    if choices is not None:
+        return value if isinstance(value, str) and value in choices else default
+    if isinstance(default, bool):
+        return value if isinstance(value, bool) else default
+    if isinstance(default, int):
+        num = _as_int(value)
+        if num is None:
+            return default
+        lo, hi = _RANGES.get(name, (num, num))
+        return max(lo, min(hi, num))
+    if isinstance(default, str):
+        return value if isinstance(value, str) else default
+    return value
+
 
 @dataclass
 class Settings:
@@ -56,7 +111,14 @@ class Settings:
 
     # ---- 路径 ----
     last_dir: str = ""
-    last_files: list[str] = field(default_factory=list)
+
+    # ---- 自动化 ----
+    #: 保存的自动化任务：[{"name": str, "steps": [{"type": str, "config": dict}]}]。
+    #: 列表/字典结构在 _coerce 里没有对应校验规则（默认值不是标量时原样返回），
+    #: 读入后的清洗统一走 core.automation.normalize_automations()。
+    automations: list = field(default_factory=list)
+    #: 上次调用的自动化（记录名字，启动时选中它）
+    last_automation: str = ""
 
     # ---- 内部 ----
     settings_version: int = 2
@@ -100,15 +162,21 @@ class Settings:
             try:
                 with open(path, encoding="utf-8") as fh:
                     data = json.load(fh)
-                valid = {f.name for f in fields(cls)}
+                if not isinstance(data, dict):
+                    raise json.JSONDecodeError("root 不是对象", "", 0)
+                # 按字段默认值的类型逐项校验：坏配置（手改错、别的版本写的）
+                # 不能让 font_size 变成字符串或 None，否则后面取字号时分分钟崩。
+                valid = {f.name: f.default for f in fields(cls)}
                 for key, value in data.items():
                     if key in valid:
-                        setattr(obj, key, value)
+                        setattr(obj, key, _coerce(key, value, valid[key]))
                 # v1 的默认字号 11pt 偏小，升级时抬到 12pt（用户自己改过的不动）
-                if data.get("settings_version", 1) < 2 and data.get("font_size") == 11:
+                raw_version = _as_int(data.get("settings_version", 1))
+                if (1 if raw_version is None else raw_version) < 2 and obj.font_size == 11:
                     obj.font_size = 12
-            except (OSError, json.JSONDecodeError):
-                pass
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                # 坏文件当没配置：返回默认值，别让启动就崩
+                obj = cls()
         return obj
 
     def save(self, path: str | None = None) -> None:

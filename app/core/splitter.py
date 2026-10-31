@@ -16,10 +16,6 @@ class SplitResult:
     chapters: int = 0
 
 
-def _write(path: str, text: str, encoding: str = "gb18030", newline: str = "\r\n") -> None:
-    enc.save_text(path, text, encoding, newline)
-
-
 def split_by_size(text: str, size_kb: int, out_dir: str, prefix: str,
                   encoding: str = "gb18030", newline: str = "\r\n") -> SplitResult:
     """按固定大小分割，尽量在行边界处断开。"""
@@ -43,7 +39,7 @@ def split_by_size(text: str, size_kb: int, out_dir: str, prefix: str,
     stem = prefix or "part"
     for i, chunk in enumerate(chunks, 1):
         path = chapter_mod.unique_path(out_dir, f"{stem}_{i:03d}")
-        _write(path, chunk, encoding, newline)
+        enc.save_text(path, chunk, encoding, newline)
         files.append(path)
     return SplitResult(files)
 
@@ -59,7 +55,7 @@ def split_by_chapter(text: str, pattern: str, out_dir: str, prefix: str,
         if prefix and use_title_as_name:
             stem = chapter_mod.safe_filename(f"{prefix}_{title}")
         path = chapter_mod.unique_path(out_dir, stem)
-        _write(path, body + "\n", encoding, newline)
+        enc.save_text(path, body + "\n", encoding, newline)
         files.append(path)
     return SplitResult(files, len(parts))
 
@@ -83,7 +79,7 @@ def merge_files(paths: list[str], out_path: str, add_filename_as_chapter: bool =
     text = "\n\n".join(blocks)
     if not text.endswith("\n"):
         text += "\n"
-    _write(out_path, text, encoding, newline)
+    enc.save_text(out_path, text, encoding, newline)
     if delete_sources:
         for path in paths:
             try:

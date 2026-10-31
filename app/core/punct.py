@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 #: 半角 → 全角（中文语境下的对应关系）
 HALF_TO_FULL = {
@@ -21,25 +22,79 @@ _PUNCT_SKIP = set("/-*|\\^@#&[]<>_=+$%`")
 #: 允许出现在它们两侧的字符（字母、数字、全角数字）
 _ALNUM = r"A-Za-z0-9０-９\u00c0-\u024f\u0370-\u03ff\u0400-\u04ff"
 
-#: 常见非法标点组合 → 修正结果（顺序有意义）
-_ILLEGAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"[。．\.]{2,}"), "……"),                # 连续句号 → 省略号
-    (re.compile(r"[．\.]{2,}"), "……"),
-    (re.compile(r"…{3,}"), "……"),
-    (re.compile(r"([，。、；：！？])\1+"), r"\1"),          # ，，， → ，
-    (re.compile(r"([，。；：、]){2,}"), r"\1"),             # 混用连续标点
-    (re.compile(r"。[ \t]*[，、；：]"), "。"),
-    (re.compile(r"[，、；：][ \t]*。"), "。"),
-    (re.compile(r"？[！!]+"), "？！"),
-    (re.compile(r"！！+"), "！！"),
-    (re.compile(r"？？+"), "？？"),
-    (re.compile(r"．"), "。"),
-    (re.compile(r"，(?=[。！？])"), ""),
-    (re.compile(r"。(?=[，、])"), ""),
-    (re.compile(r"：：+"), "："),
-    (re.compile(r"““+"), "“"),
-    (re.compile(r"””+"), "”"),
-]
+# --------------------------------------------------------------- 非法标点
+@dataclass(frozen=True, slots=True)
+class PunctRule:
+    """一条「非法标点」知识。
+
+    **唯一数据源**：以前「一键审核」（checkers.check_punct）和「格式整理」
+    （fix_illegal_punct）各写一份规则，两边会漂移 —— 检查器报的错整理器不修、
+    整理器改的地方检查器又不报。现在一条规则同时带 ``detect``（定位）和
+    ``fix``（改写步骤），两个方向读同一张表。
+
+    ``detect`` 会被拼进联合正则，因此**不许含反向引用**（``\\1`` 这类）；
+    需要反向引用的精确改写放在 ``fix`` 里单独跑，不参与拼接。
+    """
+
+    name: str                                   # 问题名称，审核表里直接显示
+    detect: str                                 # 检测正则（无反向引用）
+    fix: tuple[tuple[str, str], ...] = ()       # 改写步骤：(匹配式, 替换式)；空 = 只报不修
+
+
+#: 顺序有意义：**改写按顺序依次执行**，检测也按此顺序拼联合式（长的放前面，
+#: 否则 ``．`` 会先于 ``[。．\.]{2,}`` 命中，把连续点切成单个）。
+PUNCT_RULES: tuple[PunctRule, ...] = (
+    PunctRule("连续句号（应为省略号）", r"[。．\.]{2,}",
+              ((r"[。．\.]{2,}", "……"),)),
+    PunctRule("省略号过长", r"…{3,}", ((r"…{3,}", "……"),)),
+    PunctRule("单省略号（应为双）", r"(?<!…)…(?!…)"),
+    PunctRule("标点重复", r"[，、；：！？]{2,}",
+              ((r"([，。、；：！？])\1+", r"\1"),)),
+    PunctRule("标点混用连续", r"[，。；：、]{2,}",
+              ((r"([，。；：、]){2,}", r"\1"),)),
+    PunctRule("句号与逗号/分号/冒号连用", r"。[ \t]*[，、；：]|[，、；：][ \t]*。",
+              ((r"。[ \t]*[，、；：]", "。"), (r"[，、；：][ \t]*。", "。"))),
+    PunctRule("问号叹号连用", r"？[！!]+|！！+|？？+",
+              ((r"？[！!]+", "？！"), (r"！！+", "！！"), (r"？？+", "？？"))),
+    PunctRule("半角句点（应为句号）", r"．", ((r"．", "。"),)),
+    PunctRule("句末多余逗号", r"，(?=[。！？])", ((r"，(?=[。！？])", ""),)),
+    PunctRule("句号后多余逗号", r"。(?=[，、])", ((r"。(?=[，、])", ""),)),
+    PunctRule("重复冒号", r"：{2,}", ((r"：：+", "："),)),
+    PunctRule("重复引号", r"“{2,}|”{2,}|‘‘|’’",
+              ((r"““+", "“"), (r"””+", "”"))),
+    PunctRule("引号方向/用法错误", r"：”|：’|''|\"\""),
+    PunctRule("书名号内出现句号", r"《[\u4e00-\u9fa5]{1,40}[。\.][\u4e00-\u9fa5]{1,40}》"),
+    PunctRule("异体标点", r"[﹑﹁﹂﹄﹃︵︶︻︼︰]"),
+    PunctRule("连续半角标点", r"[．\.。，\,、·`]{2,}"),
+)
+
+
+def _build_detect() -> re.Pattern[str]:
+    parts = [f"(?:{rule.detect})" for rule in PUNCT_RULES if rule.detect]
+    return re.compile("|".join(parts))
+
+
+#: 联合检测式：一次扫描命中所有规则，重叠的位置天然只报一条（后一条规则
+#: 若与前面命中同一片段，不会重复报）。
+_ILLEGAL_PUNCT_RX = _build_detect()
+
+#: (预编译检测式, 名称)，供 :func:`describe` 回溯归类用（不重复编译）
+_DETECT_RULES: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(rule.detect), rule.name) for rule in PUNCT_RULES if rule.detect)
+
+
+def illegal_punct_rx() -> re.Pattern[str]:
+    return _ILLEGAL_PUNCT_RX
+
+
+def describe(text: str, match: re.Match[str]) -> str:
+    """这条命中属于哪一类（用于审核表里的说明列）。"""
+    start, end = match.span()
+    for rx, name in _DETECT_RULES:
+        m = rx.match(text, start)
+        if m is not None and m.end() == end:
+            return name
+    return "不规则标点"
 
 
 def _neighbors(text: str, i: int) -> tuple[str, str]:
@@ -112,10 +167,11 @@ def convert_punct(text: str, mode: str) -> str:
 
 
 def fix_illegal_punct(text: str) -> str:
-    """修正常见的非法标点组合。"""
+    """修正常见的非法标点组合（步骤来自 :data:`PUNCT_RULES`，与审核同源）。"""
     result = text
-    for pattern, repl in _ILLEGAL_PATTERNS:
-        result = pattern.sub(repl, result)
+    for rule in PUNCT_RULES:
+        for pattern, repl in rule.fix:
+            result = re.sub(pattern, repl, result)
     return result
 
 
@@ -135,9 +191,6 @@ def strip_chinese_spaces(text: str, keep_title_space: bool = True) -> str:
 def rstrip_lines(text: str) -> str:
     """去掉每行行尾的半角空格、全角空格、制表符。"""
     return re.sub(r"[ 　\t]+(?=\n|$)", "", text)
-
-
-_QUOTE_PAIRS = {"“": "”", "‘": "’", "（": "）", "《": "》", "【": "】", "(": ")", "[": "]"}
 
 
 def balance_quotes(text: str) -> str:
@@ -169,4 +222,5 @@ __all__ = [
     "convert_punct", "to_fullwidth_punct", "to_halfwidth_punct",
     "fix_illegal_punct", "strip_chinese_spaces", "rstrip_lines",
     "balance_quotes", "common_punct_fixups", "HALF_TO_FULL",
+    "PunctRule", "PUNCT_RULES", "illegal_punct_rx", "describe",
 ]

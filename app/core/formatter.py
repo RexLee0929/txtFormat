@@ -21,7 +21,9 @@ import os
 import re
 from dataclasses import dataclass, field
 
+from . import encoding as enc
 from . import punct as punct_mod
+from .paths import data_dir
 from .settings import Settings
 
 # ---------------------------------------------------------------- 章节标题
@@ -89,35 +91,36 @@ class FormatResult:
 
 
 # ---------------------------------------------------------------- 辅助数据
+_PAIRS_CACHE: dict[str, tuple[float, list[tuple[str, str]]]] = {}
+
+
 def _load_pairs(filename: str) -> list[tuple[str, str]]:
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", filename)
+    """读 ``app/data/<filename>`` 的 “旧=新” 对照表（带缓存）。
+
+    原来每次格式整理都要重新读盘 + 逐行解析（screened.txt / pinyin.txt
+    可能几千行），一按按钮就白花几十毫秒；表内容只跟文件 mtime 有关，
+    按 mtime 缓存即可。
+    """
+    path = os.path.join(data_dir(), filename)
+    try:
+        stamp = os.path.getmtime(path)
+    except OSError:
+        return []
+    cached = _PAIRS_CACHE.get(path)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+
     pairs: list[tuple[str, str]] = []
-    if not os.path.exists(path):
-        return pairs
-    for codec in ("utf-8-sig", "gb18030"):
-        try:
-            with open(path, encoding=codec) as fh:
-                for line in fh:
-                    line = line.rstrip("\n")
-                    if not line.strip() or line.lstrip().startswith("#") or "=" not in line:
-                        continue
-                    left, right, *_ = line.split("=")
-                    if left.strip():
-                        pairs.append((left.strip(), right.strip()))
-            break
-        except UnicodeDecodeError:
-            pairs.clear()
+    raw = enc.read_text_any(path)
+    for line in (raw or "").splitlines():
+        line = line.rstrip("\n")
+        if not line.strip() or line.lstrip().startswith("#") or "=" not in line:
+            continue
+        left, right, *_ = line.split("=")
+        if left.strip():
+            pairs.append((left.strip(), right.strip()))
+    _PAIRS_CACHE[path] = (stamp, pairs)
     return pairs
-
-
-def _pairs_to_table(pairs: list[tuple[str, str]]) -> dict[str, str]:
-    """把 “屏蔽形式=原文” 转成 {正则: 原文}。"""
-    table: dict[str, str] = {}
-    for masked, original in pairs:
-        pattern = r"\*+".join(re.escape(part) for part in re.split(r"\*+", masked))
-        if pattern:
-            table[pattern] = original
-    return table
 
 
 # ---------------------------------------------------------------- 各步骤
