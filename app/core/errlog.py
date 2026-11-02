@@ -58,16 +58,38 @@ def write_exception(exc: BaseException, context: str = "") -> str:
         return ""
 
 
+#: 状态栏红字通道：主窗口启动时注册（规范 §七.4 的第二个通道）。
+#: 用回调而不是 import 主窗口 —— core 层不依赖 ui 层。
+_error_sink = None
+
+
+def set_error_sink(sink) -> None:
+    """注册「状态栏红字」回调：``sink(text)``，主窗口传自己的方法进来。"""
+    global _error_sink
+    _error_sink = sink
+
+
+def _notify_status(text: str) -> None:
+    sink = _error_sink
+    if sink is None:
+        return
+    try:
+        sink(text)
+    except Exception:      # noqa: BLE001 - 状态栏没画出来也不能盖掉原异常
+        pass
+
+
 def install_excepthook() -> None:
-    """挂上全局异常钩子：未捕获异常写 error.log + 自绘错误框（规范 §七.4）。
+    """挂上全局异常钩子：未捕获异常写 error.log + 状态栏红字 + 自绘错误框（规范 §七.4）。
 
     打包成 exe 后 stderr 是看不见的 —— 只写日志不弹框，用户看到的就是
     「无声消失」（规范 §七.4 明令禁止的静默失败）。所以钩子里要：
 
     1. 写 ``error.log``（失败也不影响后续）；
-    2. QApplication 还活着时弹一个**自绘**错误框（带「打开日志」入口），
+    2. 主窗口还活着时把状态栏文字变红（第二个通道）；
+    3. QApplication 还活着时弹一个**自绘**错误框（带「打开日志」入口），
        不用系统 MessageBox、不发声；
-    3. 兜底把异常交还旧钩子（offscreen/测试环境下弹不了框也能留痕）。
+    4. 兜底把异常交还旧钩子（offscreen/测试环境下弹不了框也能留痕）。
     """
     old_hook = __import__("sys").excepthook
 
@@ -77,6 +99,7 @@ def install_excepthook() -> None:
             path = write_exception(exc_value)
         except Exception:      # noqa: BLE001
             pass
+        _notify_status("出错，详见 error.log")
         try:
             _show_error_dialog(exc_value, path)
         except Exception:      # noqa: BLE001 - 弹框失败绝不能再炸
@@ -87,67 +110,23 @@ def install_excepthook() -> None:
 
 
 def _show_error_dialog(exc: BaseException | None, log_path: str) -> None:
-    """自绘错误框：发生了什么 + 下一步怎么做 + 「打开日志」入口。
+    """自绘错误框（规范 §七.4 的第三个通道）。
 
-    只在 QApplication 已存在（事件循环还活着）时弹；对话框样式与主窗口
-    同一套（自绘、白底、无系统图标、不发声）。
+    具体外观在 ``app/ui/errdialog.py``（DWM 定制 / 定宽不可拉伸 / 标题只写程序名），
+    这里只管把异常翻成一句人话。
     """
-    from PySide6.QtCore import Qt
-    from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel,
-                                   QPushButton, QVBoxLayout)
+    from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance()
     if app is None:
         return
-
-    from .version import APP_NAME
+    from ..ui.errdialog import show_error
 
     message = "发生了未知错误。" if exc is None else str(exc) or exc.__class__.__name__
-    if len(message) > 200:
-        message = message[:200] + "…"
-
-    dlg = QDialog()
-    dlg.setWindowTitle(APP_NAME + " 遇到问题")
-    dlg.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
-    dlg.setMinimumWidth(420)
-    try:
-        from .ui.theme import stylesheet
-        dlg.setStyleSheet(stylesheet())
-    except Exception:      # noqa: BLE001
-        pass
-
-    lay = QVBoxLayout(dlg)
-    lay.setContentsMargins(20, 18, 20, 16)
-    lay.setSpacing(12)
-    head = QLabel(APP_NAME + " 遇到问题，需要关闭。")
-    head.setStyleSheet("font-weight: 600; font-size: 13px;")
-    lay.addWidget(head)
-    body = QLabel(message + "\n\n已把错误详情写入 error.log，可以打开日志查看。")
-    body.setWordWrap(True)
-    body.setStyleSheet("font-size: 12px;")
-    lay.addWidget(body, 1)
-
-    row = QHBoxLayout()
-    row.addStretch(1)
-    if log_path and os.path.exists(log_path):
-        log_btn = QPushButton("打开日志")
-
-        def _open_log() -> None:
-            try:
-                os.startfile(log_path)                      # noqa: S606
-            except Exception:   # noqa: BLE001
-                pass
-            dlg.accept()
-
-        log_btn.clicked.connect(_open_log)
-        row.addWidget(log_btn)
-    close = QPushButton("关闭")
-    close.setDefault(True)
-    close.clicked.connect(dlg.accept)
-    row.addWidget(close)
-    lay.addLayout(row)
-
-    dlg.exec()
+    # 带上 parent：否则 QDialog 会弹到屏幕正中（主窗在副屏时就跑到另一块屏上去了）。
+    # 防叠弹由 show_error 内部的 _showing 标志负责。
+    show_error(message, log_path, app.activeWindow())
 
 
-__all__ = ["LOG_NAME", "log_path", "write_exception", "install_excepthook"]
+__all__ = ["LOG_NAME", "log_path", "write_exception", "install_excepthook",
+           "set_error_sink"]

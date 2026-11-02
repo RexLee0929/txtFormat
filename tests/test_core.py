@@ -303,9 +303,57 @@ def test_automation() -> None:
     eq("自动化-坏数据整体2", automation.normalize_automations(None), [])
 
 
+def test_aboutmd() -> None:
+    """关于文案：从 md 读、占位符替换、页脚靠 © 识别（规范 §八）。"""
+    from app.core import aboutmd
+
+    check("关于-md 文件存在", bool(aboutmd.md_path()), str(aboutmd.md_path()))
+    raw = aboutmd.read_md()
+    check("关于-md 非空", len(raw) > 200, f"{len(raw)} 字符")
+
+    html = aboutmd.render(accent="#123456")
+    for key in aboutmd.placeholders():
+        check(f"关于-占位符已替换{key}", key not in html, key)
+    check("关于-标题含程序名", "txtFormat" in html, html[:80])
+    check("关于-版本带强调色", 'color:#123456' in html, html[:200])
+    check("关于-副标题规范灰", "color:#5C5C5C" in html, "")
+    check("关于-页脚规范灰", "color:#8A8A8A" in html, "")
+    check("关于-列表圆点用强调色", html.count('color:#123456;">•') >= 3, "")
+    check("关于-小节标题加粗", "<b>主要功能</b>" in html, "")
+    # 「快捷键」标题与各行必须同段（md 里隔空行也要合并）
+    check("关于-快捷键标题合并同段", "<b>快捷键</b><br>" in html, "")
+
+    # 坏输入不能炸：空串/纯空白都给得出最小文案
+    check("关于-空 md 兜底", "txtFormat" in aboutmd.render("", accent="#000000"), "")
+    check("关于-空白 md 兜底", "txtFormat" in aboutmd.render("   \n\n ", accent="#000000"), "")
+
+
+def test_version_single_source() -> None:
+    """版本号只认 installer/version.props（规范 §一）。"""
+    from app.core import version
+
+    check("版本-已从 props 读到", version.APP_VERSION != version.FALLBACK_VERSION,
+          version.APP_VERSION)
+    check("版本-格式合法", all(p.isdigit() for p in version.APP_VERSION.split(".")),
+          version.APP_VERSION)
+    props = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         version.VERSION_FILE)
+    check("版本-props 存在", os.path.isfile(props), props)
+    with open(props, encoding="utf-8") as fh:
+        import re as _re
+        found = _re.search(r"<Version>([^<]+)</Version>", fh.read())
+    eq("版本-py 与 props 一致", version.APP_VERSION, found.group(1).strip())
+    # 源码里不许再出现第二份字面量版本号
+    with open(os.path.join(os.path.dirname(props), "..", "app", "core", "version.py"),
+              encoding="utf-8") as fh:
+        code = fh.read()
+    check("版本-源码无版本字面量", f'"{version.APP_VERSION}"' not in code, "")
+
+
 def main() -> int:
     for fn in (test_encoding, test_numcn, test_punct, test_regexlib, test_chapter,
                test_formatter, test_checkers, test_adfilter, test_splitter, test_zhconv,
+               test_aboutmd, test_version_single_source,
                test_automation):
         try:
             fn()

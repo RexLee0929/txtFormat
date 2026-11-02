@@ -7,13 +7,79 @@
 """
 
 import os
+import re
 
 APP_NAME = "txtFormat"
-VERSION_FILE = os.path.join("tools", "version_info.txt")
+
+# ---- 版本：唯一来源是 installer/version.props（规范 §十三.8）----
+# exe 的版本资源（文件属性 → 详细信息）在这里现生成、写进 build/，
+# 仓库里不存手写的版本资源文件；改版本只改 props：
+#   · 运行期 app/core/version.py 读 props（随包进 exe，datas 里有）；
+#   · 打包期本脚本读 props 生成 PE 版本资源；
+#   · 安装器 csproj Import 同一份 props。
+_PROPS_TEXT = open(os.path.join(SPECPATH, "installer", "version.props"),
+                   encoding="utf-8").read()
+
+
+def _field(name: str, default: str = "") -> str:
+    m = re.search(rf"<{name}>([^<]+)</{name}>", _PROPS_TEXT)
+    return m.group(1).strip() if m else default
+
+
+VERSION = _field("Version")
+COMPANY = _field("Company", "Rex Lee")
+PRODUCT = _field("Product", APP_NAME)
+if not VERSION:
+    raise SystemExit("installer/version.props 里读不到 <Version>：版本资源宁可不打包，也不写死")
+
+_QUAD = tuple(([int(x) for x in VERSION.split(".")] + [0, 0, 0, 0])[:4])
+_QUAD_S = ".".join(str(x) for x in _QUAD)
+
+_BUILD_DIR = os.path.join(SPECPATH, "build")
+os.makedirs(_BUILD_DIR, exist_ok=True)
+VERSION_FILE = os.path.join(_BUILD_DIR, "file_version.txt")
+with open(VERSION_FILE, "w", encoding="utf-8") as _fh:
+    _fh.write(f"""# UTF-8
+# 由 txtFormat.spec 从 installer/version.props 现生成 —— 不手改，改版本只改 props
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={_QUAD},
+    prodvers={_QUAD},
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          u'080404B0',
+          [StringStruct(u'CompanyName', u'{COMPANY}'),
+           StringStruct(u'FileDescription', u'{PRODUCT}'),
+           StringStruct(u'FileVersion', u'{_QUAD_S}'),
+           StringStruct(u'InternalName', u'{APP_NAME}'),
+           StringStruct(u'LegalCopyright', u'{_field("Copyright")}'),
+           StringStruct(u'LegalTrademarks', u''),
+           StringStruct(u'OriginalFilename', u'{APP_NAME}.exe'),
+           StringStruct(u'ProductName', u'{PRODUCT}'),
+           StringStruct(u'ProductVersion', u'{VERSION}'),
+           StringStruct(u'Comments', u'作者 {_field("Authors", COMPANY)}    联系邮箱 rexlee@rexleepro.com'),
+           StringStruct(u'PrivateBuild', u''),
+           StringStruct(u'SpecialBuild', u'')])
+      ]),
+    VarFileInfo([VarStruct(u'Translation', [2052, 1200])])
+  ]
+)
+""")
 
 datas = [
-    ("app/data", "app/data"),        # 词表：错别字 / 屏蔽码 / 拼音
+    ("app/data", "app/data"),        # 词表：错别字 / 屏蔽码 / 拼音 + ABOUT.md
     ("app/assets", "app/assets"),    # 图标
+    # 版本号的唯一来源（规范 §一）：随包进 exe，运行期与开发期读同一份文件
+    (os.path.join("installer", "version.props"), "."),
 ]
 
 a = Analysis(

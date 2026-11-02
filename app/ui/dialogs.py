@@ -8,14 +8,15 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox,
                                QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QPushButton, QRadioButton, QSpinBox, QTableWidget,
-                               QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget)
+                               QPlainTextEdit, QPushButton, QRadioButton, QSpinBox,
+                               QTableWidget, QTableWidgetItem, QTextBrowser, QTextEdit,
+                               QVBoxLayout, QWidget)
 
+from ..core import aboutmd
 from ..core import chapter as chapter_mod
 from ..core import checkers, encoding as enc
 from ..core.settings import Settings
-from ..core.version import (APP_NAME, APP_SUBTITLE, APP_VERSION, AUTHOR, AUTHOR_EMAIL,
-                            COPYRIGHT)
+from ..core.version import APP_NAME, AUTHOR, AUTHOR_EMAIL
 from . import icons
 from .theme import ACCENT, Color, apply_dwm_chrome
 from .task import start_task, task_running, wait_task
@@ -23,19 +24,41 @@ from .widgets import (Caption, CommandButton, CopyChip, IconButton, PrimaryButto
                       SectionLabel)
 
 
+#: 正文换行阈值（px）——**本程序自己定的上限，不是窗口宽的档位**（规范 §七.2）。
+#: 依据：正文 12px 微软雅黑，一个汉字约 12px，一行 44 字 ≈ 528px；加卡片左右内边距
+#: 20×2 = 568；再留一点余量给「标签 + 控件」两列，取 640。超过这个宽度眼睛就要
+#: 左右扫行了，所以**让正文折行，而不是把窗口撑宽**。
+WRAP_LIMIT = 640
+
+#: 对话框最小宽度：够放「取消 + 一个动词按钮」，再窄按钮就会换行。
+MIN_WIDTH = 320
+
+#: 工具窗口的最小尺寸（§七.7 的 MinWidth / MinHeight 兜底，不按内容拟合）
+TOOL_MIN_WIDTH = 620
+TOOL_MIN_HEIGHT = 460
+
+#: 多行输入框敢给的最小可用宽（px，约 22 个汉字）：再窄一行字都写不满，
+#: 输入长正则时看不到全局。内容由用户输入、量不出来，只能按「能用」兜底。
+TEXT_FIELD_MIN_WIDTH = 380
+
+
 class BaseDialog(QDialog):
     """对话框基类（规范 §七.2：主窗口的延续，不另立样式）。
 
     * **DWM 标题栏与主窗口同一套**（caption = #F3F3F3）—— 对话框不再是
       「另一种标题栏」；
-    * **宽度固定、NoResize、高度按内容拟合**：禁止用户拉伸；
+    * **宽度按内容算、NoResize、高度按内容拟合**：打开时量出「最长的一行不可断
+      内容」，内容短就窄回去，内容长就变宽（到 :data:`WRAP_LIMIT` 就让正文折行）。
+      子类**不许**再往构造参数里传宽度死数 —— 那正是「所有框统一写死」的来源；
     * 行内提示出现/消失时高度跟着重算，内容不会被截。
+
+    工具窗口（内容是反复改的表 / 列表）不要继承本类，走 :class:`ToolDialog`：
+    那类窗口可拉伸、宽度归用户，与这里的 NoResize 是两套口径（规范 §七.7）。
     """
 
-    def __init__(self, title: str, parent: QWidget | None = None, width: int = 560):
+    def __init__(self, title: str, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setMinimumWidth(width)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, False)
         self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, False)
@@ -43,17 +66,95 @@ class BaseDialog(QDialog):
         self.root.setContentsMargins(20, 18, 20, 18)
         self.root.setSpacing(14)
         self._notice: QLabel | None = None
+        self._fitted = False
 
     # ---------------------------------------------------------------- 尺寸
     def showEvent(self, event):                # noqa: N802 - Qt 命名
         super().showEvent(event)
         # 句柄建好才能做 DWM 定制（过早调用拿不到有效 hwnd）
         apply_dwm_chrome(int(self.winId()))
-        self.setFixedSize(self.size())
+        self.fit_content()
+
+    def natural_width(self) -> int:
+        """量「最长的**一行**不可断内容」（规范 §七.2）。
+
+        不能直接用 ``QLayout.sizeHint()``：带 ``wordWrap`` 的 QLabel、以及
+        ``QTextBrowser``/表格这类控件给的 Preferred 宽普遍偏小，实测会让每个框
+        都掉到下限 320（短句和长段一样宽 —— 那就又变成"写死"了）。
+
+        这里按行量：硬换行拆开，逐行取 ``horizontalAdvance`` 的最大值；整段没有
+        硬换行的长说明自然量出一个很大的数，会被 :data:`WRAP_LIMIT` 夹住、
+        让正文折行 —— 这正是「上限是换行阈值，不是窗口档位」的意思。
+        """
+        # 卡片左右内边距（root margins 20×2）：文本宽加上它才是窗口该有的宽
+        pad = 40
+        need = self.root.sizeHint().width()
+
+        for label in self.findChildren(QLabel):
+            text = label.text()
+            if not text:
+                continue
+            fm = label.fontMetrics()
+            line_w = max(fm.horizontalAdvance(line) for line in text.split("\n"))
+            need = max(need, line_w + pad)
+
+        # 富文本正文（关于框）：按整篇不折行的理想宽算，再交给上限夹住
+        for browser in self.findChildren(QTextBrowser):
+            doc = browser.document()
+            if doc is not None:
+                doc.setTextWidth(-1)            # -1 = 不限宽，让 idealWidth 反映真实排版
+                need = max(need, int(doc.idealWidth()) + pad)
+
+        # 列表 / 表格：按**实际内容**量（列表取最宽那一项，表格取列宽之和）。
+        # 它们的 Preferred 宽基本是个固定小值，不按内容量的话「文件合并」会挤成 334。
+        for view in self.findChildren(QListWidget):
+            need = max(need, view.sizeHintForColumn(0) + 28 + pad)   # 28 = 图标列 + 边距
+        for table in self.findChildren(QTableWidget):
+            cols = sum(table.columnWidth(i) for i in range(table.columnCount()))
+            need = max(need, cols + 24 + pad)
+
+        # 多行输入框：内容由用户输入，按「能用」的下限兜住（约 22 个汉字），
+        # 再窄一行字都写不满，输入长正则会看不到全局。
+        # （findChildren 只接受单个类型，不能传元组）
+        for edit in self.findChildren(QPlainTextEdit) + self.findChildren(QTextEdit):
+            need = max(need, TEXT_FIELD_MIN_WIDTH + pad)
+
+        return need
+
+    def fit_content(self) -> None:
+        """按内容定宽 + 按内容拟合高度（规范 §七.2 的两条一起做）。
+
+        顺序不能反：**先定宽再算高** —— 带 ``wordWrap`` 的 QLabel 高度依赖宽度，
+        先按窄宽度算高会把「两行」永久记下来，窗口底部凭空多一条空带。
+        """
+        # 上一轮 setFixedWidth 把 min/max 都钉住了，不先放开就量不出新的自然宽
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(16777215)          # QWIDGETSIZE_MAX
+        self.root.activate()
+
+        width = max(MIN_WIDTH, min(self.natural_width(), WRAP_LIMIT))
+        self.setFixedWidth(width)
+
+        self.root.activate()
+        # heightForWidth 在「没有可折行子项」的布局上返回 **-1**（不是 0），
+        # 写成 `hfw or sizeHint()` 会把 -1 当真值、窗口高度变成 0（实测「转到」
+        # 「重编码」两个框直接塌成一条线）。必须显式判 > 0。
+        hfw = self.root.heightForWidth(width)
+        height = hfw if hfw > 0 else self.root.sizeHint().height()
+        self.setFixedHeight(height)
+        self._fitted = True
 
     def refit(self) -> None:
-        """内容增删后按新的内容高度重设窗口高（宽度保持不变）。"""
-        self.setFixedHeight(self.sizeHint().height())
+        """内容增删后只重算**高度**。
+
+        宽度在打开那一刻量好就固定：行内提示（:meth:`notice`）出现/消失时若连宽度
+        一起重算，用户眼前的框会突然变宽变窄 —— 那是抖动，不是「按内容」。
+        """
+        if not self._fitted:
+            return
+        width = self.width()
+        hfw = self.root.heightForWidth(width)
+        self.setFixedHeight(hfw if hfw > 0 else self.root.sizeHint().height())
 
     # ---------------------------------------------------------------- 行内提示
     def notice(self, text: str = "", kind: str = "info") -> None:
@@ -81,7 +182,16 @@ class BaseDialog(QDialog):
         # 提示出现/消失会改变内容高度，窗口高度跟着重算（NoResize 下内容不能被截）
         self.refit()
 
-    def add_footer(self, ok_text: str = "确定", cancel_text: str = "取消") -> QHBoxLayout:
+    def add_footer(self, ok_text: str, cancel_text: str = "取消") -> QHBoxLayout:
+        """按钮栏（规范 §七.3：主按钮必须是**动词短语**，把后果写进去）。
+
+        ``ok_text`` **故意不给默认值** —— 曾经的默认「确定」会被新对话框顺手带进来，
+        而「确定」不说明点了会发生什么（规范原文就写着「确定」→「删除 3 个文件」）。
+        必填之后，漏写会在第一次打开对话框时直接报错，而不是悄悄多出一个「确定」。
+
+        ``cancel_text`` 保留默认「取消」：取消的语义固定，不需要每个对话框各写一遍；
+        传空串表示不要次按钮（只剩一个主按钮）。
+        """
         row = QHBoxLayout()
         row.addStretch(1)
         if cancel_text:
@@ -94,6 +204,53 @@ class BaseDialog(QDialog):
         row.addWidget(ok)
         self.root.addLayout(row)
         return row
+
+
+class ToolDialog(BaseDialog):
+    """工具窗口（规范 §七.7）：内容是**反复改的表 / 列表** —— 可拉伸，宽度归用户。
+
+    与 §七.2 的对话框是**两套口径，不叠加**：这里既不做 ``setFixedWidth``，也不按
+    内容拟合高度，只给 MinWidth / MinHeight 兜住排版；首帧按内容给一个合适的初始
+    尺寸，之后用户爱拉多大拉多大（表格要拖宽才看得见更多列）。
+
+    判据（先判本节，再判 §七.2）：**内容是一张要反复改的表 / 列表 → 本文具窗口；
+    只是一句话的确认或说明 → :class:`BaseDialog`。** 判成对话框的窗口不许用这套
+    来回避拟合 —— 那正是「该拟合的不拟合」。
+    """
+
+    def showEvent(self, event):                # noqa: N802 - Qt 命名
+        # 直接跳过 BaseDialog.showEvent：它会把窗口 setFixedSize 钉死，
+        # 工具窗口一旦被钉住就再也拉不动（表格型窗口的命门）。
+        QDialog.showEvent(self, event)
+        apply_dwm_chrome(int(self.winId()))
+        if self._fitted:
+            return
+        self._fitted = True
+        # 首帧按内容给一个起点，但**不锁定**：下限由 MinWidth/MinHeight 兜住，
+        # 上限由屏幕兜住（表格的自然宽可能比屏幕还宽，撑出去就点不到按钮了）。
+        hint = self.root.sizeHint()
+        screen = self.screen()
+        avail = screen.availableGeometry() if screen is not None else None
+        max_w = int(avail.width() * 0.82) if avail else 1280
+        max_h = int(avail.height() * 0.82) if avail else 900
+        self.setMinimumSize(min(TOOL_MIN_WIDTH, max_w), min(TOOL_MIN_HEIGHT, max_h))
+        self.resize(min(max(hint.width(), TOOL_MIN_WIDTH), max_w),
+                    min(max(hint.height(), TOOL_MIN_HEIGHT), max_h))
+
+    def refit(self) -> None:
+        """工具窗口的尺寸归用户：内容增删**不重排窗口**，免得刚拉好的大小被抢走。"""
+
+    def keyPressEvent(self, event):            # noqa: N802 - Qt 命名
+        """Esc 关闭；但焦点在输入框里时先让输入框失焦，不直接关窗。
+
+        规范 §七.7：打字打到一半按 Esc 就把窗口关掉，是这个体型最常见的误伤。
+        """
+        if event.key() == Qt.Key.Key_Escape:
+            focus = self.focusWidget()
+            if isinstance(focus, (QLineEdit, QSpinBox, QComboBox)):
+                focus.clearFocus()
+                return
+        super().keyPressEvent(event)
 
 
 def _radio_group(options: list[tuple[str, str]], current: str, on_change) -> tuple[QWidget, dict[str, QRadioButton]]:
@@ -117,7 +274,7 @@ def _radio_group(options: list[tuple[str, str]], current: str, on_change) -> tup
 # ------------------------------------------------------------------ 选项
 class OptionsDialog(BaseDialog):
     def __init__(self, settings: Settings, parent: QWidget | None = None):
-        super().__init__("格式整理选项", parent, 620)
+        super().__init__("格式整理选项", parent)
         self.settings = settings
 
         self.root.addWidget(SectionLabel("格式整理选项"))
@@ -244,12 +401,11 @@ class OptionsDialog(BaseDialog):
 
 
 # ------------------------------------------------------------------ 章节
-class SplitDialog(BaseDialog):
+class SplitDialog(ToolDialog):
     """文件分割 / 章节整理。"""
 
     def __init__(self, text: str, settings: Settings, parent: QWidget | None = None):
-        super().__init__("文件分割 / 章节整理", parent, 860)
-        self.resize(900, 620)
+        super().__init__("文件分割 / 章节整理", parent)
         self.text = text
         self.settings = settings
         self.chapters: list[chapter_mod.Chapter] = []
@@ -499,7 +655,7 @@ class SplitDialog(BaseDialog):
 # ------------------------------------------------------------------ 合并
 class MergeDialog(BaseDialog):
     def __init__(self, files: list[str], settings: Settings, parent: QWidget | None = None):
-        super().__init__("文件更名 / 文件合并", parent, 620)
+        super().__init__("文件更名 / 文件合并", parent)
         self.files = files
         self.settings = settings
         self.result: dict | None = None
@@ -595,10 +751,9 @@ REVIEW_ITEMS = [
 ]
 
 
-class QuickReviewDialog(BaseDialog):
+class QuickReviewDialog(ToolDialog):
     def __init__(self, text: str, parent: QWidget | None = None):
-        super().__init__("快速审核", parent, 760)
-        self.resize(820, 640)
+        super().__init__("快速审核", parent)
         self.text = text
         self.issues: list[checkers.Issue] = []
         self._all: list[checkers.Issue] = []
@@ -717,7 +872,7 @@ class QuickReviewDialog(BaseDialog):
 # ------------------------------------------------------------------ 转到
 class GotoDialog(BaseDialog):
     def __init__(self, max_line: int, parent: QWidget | None = None):
-        super().__init__("转到", parent, 380)
+        super().__init__("转到", parent)
         self.root.addWidget(QLabel("跳转到："))
         self.line_radio = QRadioButton("行")
         self.percent_radio = QRadioButton("百分比")
@@ -748,7 +903,7 @@ class GotoDialog(BaseDialog):
 # ------------------------------------------------------------------ 重编码
 class RecodeDialog(BaseDialog):
     def __init__(self, current: str, parent: QWidget | None = None):
-        super().__init__("重编码", parent, 420)
+        super().__init__("重编码", parent)
         self.root.addWidget(QLabel("目标编码："))
         self.combo = QComboBox()
         for label, codec in enc.ENCODINGS:
@@ -773,38 +928,17 @@ class RecodeDialog(BaseDialog):
 
 
 # ------------------------------------------------------------------ 关于
-ABOUT_TEXT = f"""
-<h2 style="margin-bottom:2px;">{APP_NAME} <span style="color:{ACCENT};">{APP_VERSION}</span></h2>
-<p style="color:#666;margin-top:0;">{APP_SUBTITLE}</p>
-
-<p>面向中文长文本（小说、讲稿、转录稿）的批量整理工具。全部功能在本地完成，不上传任何内容。</p>
-
-<p><b>主要功能</b></p>
-<ul>
-<li>格式整理：行尾清理、标点全半角、硬回车合并、行首缩进、广告清理、屏蔽码与拼音还原</li>
-<li>正则查找替换：80 余条内置表达式 + 你的 custreg.txt，支持自定义扩充</li>
-<li>章节整理：章节名规范化、重排编号、按章节或大小分割、多文件合并</li>
-<li>快速审核：错别字、的得地、引号括号、不规则标点、繁体字、超长段落</li>
-<li>格式转换：HTML / EPUB / DOCX / PDB / MOBI / JAR / CHM / RTF → TXT，编码互转，简繁转换</li>
-</ul>
-
-<p><b>快捷键</b><br>
-Ctrl+O 打开　Ctrl+S 保存　Ctrl+Shift+S 另存为　Ctrl+F 查找<br>
-F3 查找下一个　Shift+F3 查找上一个　Ctrl+G 转到<br>
-Ctrl+D 格式整理　Ctrl+Shift+F 快速审核　Ctrl+Shift+A 广告检查<br>
-Tab / Shift+Tab 缩进 / 反缩进　Ctrl+= / Ctrl+- 缩放字号</p>
-
-<p style="color:#888;font-size:11px;">本程序参照原 txtFormat 文本校对 V2.10 重写：界面与代码结构完全重构，
-处理逻辑与内置规则依据原程序说明文档与其内置表达式表还原。<br>{COPYRIGHT}　保留所有权利。</p>
-"""
+#
+# 文案不写在这里（规范 §八）：全部放在 app/data/ABOUT.md，启动时读文件、
+# 替换占位符、再渲成富文本。改一句介绍只改 md，不动代码、不重算窗口高度。
 
 
 class AboutDialog(BaseDialog):
     def __init__(self, parent: QWidget | None = None):
-        super().__init__("关于 " + APP_NAME, parent, 640)
+        super().__init__("关于 " + APP_NAME, parent)
         self._browser = QTextBrowser()
         self._browser.setOpenExternalLinks(False)          # 不打开外部程序
-        self._browser.setHtml(ABOUT_TEXT)
+        self._browser.setHtml(aboutmd.render(accent=ACCENT))
         self._browser.setStyleSheet(f"background: {Color.card}; border: 1px solid {Color.border};"
                                     f"border-radius: 8px; padding: 14px;")
         # 高度不写死（规范 §八）：showEvent 里按富文本真实高度拟合
@@ -872,4 +1006,5 @@ class AboutDialog(BaseDialog):
 
 
 __all__ = ["OptionsDialog", "SplitDialog", "MergeDialog", "QuickReviewDialog",
-           "GotoDialog", "RecodeDialog", "AboutDialog", "BaseDialog", "REVIEW_ITEMS"]
+           "GotoDialog", "RecodeDialog", "AboutDialog", "BaseDialog", "ToolDialog",
+           "REVIEW_ITEMS", "WRAP_LIMIT", "MIN_WIDTH"]

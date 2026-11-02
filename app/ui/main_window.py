@@ -15,23 +15,24 @@ from PySide6.QtWidgets import (QDialog, QFileDialog, QFrame, QHBoxLayout,
 
 from ..core import adfilter, automation as automation_mod, convert as convert_mod
 from ..core import encoding as enc
+from ..core import errlog
 from ..core import formatter, punct, regexlib, splitter, zhconv
 from ..core.settings import Settings
 from ..core.version import APP_NAME, APP_VERSION, AUTHOR_EMAIL
-from . import dialogs, icons
+from . import dialogs, icons, menu_def
 from .automation import AutomationPanel
 from .editor import TextEditor
+from .fontdialog import FontDialog
 from .panels import FilePanel, ReplacePanel, human_size
-from .theme import Color, editor_font_qss, stylesheet
+from .theme import Color, editor_font_qss
 from .task import start_task, task_running, wait_task
 from .widgets import (Card, Caption, CommandButton, CompactComboBox,
                       ConfirmBar, IconButton, Menu, Toast)
 
 ZERO_WIDTH = "\u200b"
 
-# 字体对话框「恢复默认值」的出厂默认（简体中文 · 黑体 · 14 号）
-DEFAULT_FONT_FAMILY = "黑体"
-DEFAULT_FONT_SIZE = 14
+# 字体对话框的出厂默认值已随对话框本体迁到 app/ui/fontdialog.py
+# （DEFAULT_FONT_FAMILY / DEFAULT_FONT_SIZE），这里不再留第二份。
 
 
 class MainWindow(QMainWindow):
@@ -61,8 +62,11 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(QSize(1160, 720))
         self.resize(1420, 880)
         self.command_buttons: list[CommandButton] = []
-        self.setStyleSheet(stylesheet() + editor_font_qss(
-            self.settings.font_family, self.settings.font_size, self.settings.line_height_percent))
+        # 基础主题已挂 QApplication 全局（main.main），这里只追加编辑器专属段
+        self.setStyleSheet(editor_font_qss(
+            self.settings.font_family, self.settings.font_size,
+            self.settings.line_height_percent, self.settings.font_weight,
+            self.settings.font_italic))
 
         self._build_ui()
         self._build_menus()
@@ -167,12 +171,24 @@ class MainWindow(QMainWindow):
         # ---- 状态栏
         status = QStatusBar()
         status.setSizeGripEnabled(False)
+        # 规范 §六：状态栏高 26px 的固定仪表条。不固定的话它会随内容（字号、
+        # 红字是否出现）自己长高，四段式骨架就会跟着晃；底色见 theme 的
+        # Color.status_bg（比窗口底色深一档，和内容区分开）。
+        status.setFixedHeight(26)
         self.setStatusBar(status)
         self.pos_label = QLabel("行 1:列 1")
         self.sel_label = QLabel("选定 0 字符")
         self.count_label = QLabel("共 0 字")
         self.enc_label = QLabel("")
         self.mod_label = QLabel("")
+        # ---- 错误状态（规范 §七.4 第二通道：状态栏红字）
+        # 未捕获异常时由 errlog 通过 set_error_sink 回调点亮，一直留到用户
+        # 处理完（不像 Toast 那样几秒消失 —— 那正是规范点名禁止的「界面没变化」）。
+        self.err_label = QLabel("")
+        self.err_label.setStyleSheet(f"color: {Color.danger}; font-size: 12px;")
+        self.err_label.setVisible(False)
+        status.addWidget(self.err_label)
+        errlog.set_error_sink(self.show_error_status)
         for w in (self.pos_label, self.sel_label, self.count_label):
             status.addWidget(self._status_sep())
             status.addWidget(w)
@@ -187,6 +203,22 @@ class MainWindow(QMainWindow):
         line.setFixedSize(1, 12)
         line.setStyleSheet(f"background: {Color.border_strong}; margin: 0 8px;")
         return line
+
+    def show_error_status(self, text: str = "出错") -> None:
+        """状态栏红字（规范 §七.4 第二通道），由 errlog 的异常钩子回调。
+
+        状态栏被用户关掉时要先打开 —— 否则「红字」这条通道等于不存在。
+        """
+        self.err_label.setText(text or "出错")
+        self.err_label.setVisible(True)
+        bar = self.statusBar()
+        if not bar.isVisible():
+            bar.setVisible(True)
+            act = getattr(self, "act_status", None)
+            if act is not None and not act.isChecked():
+                act.blockSignals(True)
+                act.setChecked(True)
+                act.blockSignals(False)
 
     def _build_command_bar(self) -> QWidget:
         bar = Card(padding=8, spacing=6)
@@ -315,92 +347,131 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- 菜单
     def _build_menus(self) -> None:
+        """按 ``menu_def.MENUS`` 建树（规范 §五.2：数据驱动 + 独立 builder）。
+
+        数据表在 :mod:`app.ui.menu_def`（纯数据，不含 Qt 类型），这里只把每条
+        数据变成一个 QAction 并接到分发器。于是菜单结构能被 ``--menutest``
+        的四条断言整体验证（§十），不用靠人眼看。
+        """
         menubar = self.menuBar()
+        for group in menu_def.MENUS:
+            menu = self._add_menu(menubar, group.title)
+            self._populate(menu, group.items)
+        # 可勾选项的初始勾选态取自设置（数据表里只写默认值）
+        act = getattr(self, "act_wrap", None)
+        if act is not None:
+            act.blockSignals(True)
+            act.setChecked(bool(self.settings.word_wrap))
+            act.blockSignals(False)
 
-        # 弹层全部用自绘 Menu（规范 §五：白色圆角卡片、快捷键灰、分隔线缩进）
-        m_file = self._add_menu(menubar, "文件(&F)")
-        self._action(m_file, "新建", "Ctrl+N", self.new_file, "new")
-        self._action(m_file, "打开…", "Ctrl+O", self.open_file, "open")
-        self._action(m_file, "保存", "Ctrl+S", self.save_file, "save")
-        self._action(m_file, "另存为…", "Ctrl+Shift+S", self.save_file_as, "save-as")
-        m_file.addSeparator()
-        self._action(m_file, "打开所在文件夹", "", self.reveal_in_explorer, "folder")
-        m_file.addSeparator()
-        self.act_revert = self._action(m_file, "还原为打开时的内容", "", self.revert_to_original, "undo")
-        self.act_revert.setEnabled(False)
-        m_file.addSeparator()
-        self._action(m_file, "退出", "Esc", self.close, "close")
+    def _populate(self, parent: QMenu, items) -> None:
+        for item in items:
+            if item.submenu:
+                self._populate(self._add_menu(parent, item.text), item.submenu)
+            elif item.text == "-":
+                parent.addSeparator()
+            else:
+                parent.addAction(self._make_action(item))
 
-        m_edit = self._add_menu(menubar, "编辑(&E)")
-        self._action(m_edit, "撤消", "Ctrl+Z", self.editor_undo, "undo")
-        self._action(m_edit, "恢复", "Ctrl+Shift+Z", self.editor_redo, "redo")
-        m_edit.addSeparator()
-        self._action(m_edit, "剪切", "Ctrl+X", lambda: self.editor.cut(), "outdent")
-        self._action(m_edit, "复制", "Ctrl+C", lambda: self.editor.copy(), "copy")
-        self._action(m_edit, "粘贴", "Ctrl+V", lambda: self.editor.paste(), "insert")
-        self._action(m_edit, "全选", "Ctrl+A", lambda: self.editor.selectAll(), "check")
-        m_edit.addSeparator()
-        self._action(m_edit, "转到…", "Ctrl+G", self.run_goto, "goto")
-        self._action(m_edit, "向下查找下一个", "F3", lambda: self.find_next(True), "next")
-        self._action(m_edit, "向上查找上一个", "Shift+F3", lambda: self.find_next(False), "prev")
-        m_edit.addSeparator()
-        m_ins = self._add_menu(m_edit, "插入")
-        self._action(m_ins, "插入符号：“", "", lambda: self.insert_text("“"), "insert")
-        self._action(m_ins, "插入符号：……", "", lambda: self.insert_text("……"), "insert")
-        self._action(m_ins, "插入分隔线：※※※", "", lambda: self.insert_text("※※※"), "insert")
-        self._action(m_ins, "插入日期", "Ctrl+Shift+D", self.insert_date, "file")
-        self._action(m_ins, "插入文件名", "", self.insert_filename, "file")
+    def _make_action(self, item: menu_def.Item) -> QAction:
+        action = QAction(item.text, self)
+        if item.icon:
+            action.setIcon(icons.icon(item.icon, Color.text, 16))
+        if item.gesture:
+            action.setShortcut(QKeySequence(item.gesture))
+        action.setCheckable(item.checkable)
+        action.setEnabled(item.enabled)
+        action.setData(item.cmd)          # 命令 id 挂在 action 上，自检/调试可读
+        if item.attr:
+            setattr(self, item.attr, action)
+        if item.checkable:
+            # 规范 §五：可勾选项选中时，在图标列位置显示强调色勾（不显示该项图标）
+            self._sync_check_icon(action, item.icon)
+            action.setChecked(item.checked)
+            action.toggled.connect(lambda checked, a=action, it=item:
+                                   self._on_check_toggled(a, it, checked))
+        else:
+            action.triggered.connect(lambda _checked=False, it=item:
+                                     self._dispatch(it.cmd, it.args))
+        return action
 
-        m_sel = self._add_menu(m_edit, "选定内容")
-        self._action(m_sel, "制表符缩进", "Tab", lambda: self.indent_selection("tab", 1), "indent")
-        self._action(m_sel, "制表符反缩进", "Shift+Tab", lambda: self.indent_selection("tab", -1), "outdent")
-        self._action(m_sel, "空格缩进", "", lambda: self.indent_selection(self.settings.indent_kind, 1), "indent")
-        self._action(m_sel, "空格反缩进", "", lambda: self.indent_selection(self.settings.indent_kind, -1), "outdent")
-        self._action(m_sel, "去除行尾空格", "", self.strip_tail_spaces, "clean")
-        m_sel.addSeparator()
-        self._action(m_sel, "转为大写", "", lambda: self.change_case("upper"), "case")
-        self._action(m_sel, "转为小写", "", lambda: self.change_case("lower"), "case")
-        self._action(m_sel, "首尾引号规范化", "", self.normalize_quotes, "format")
+    def _on_check_toggled(self, action: QAction, item: menu_def.Item, checked: bool) -> None:
+        self._sync_check_icon(action, item.icon)
+        self._dispatch(item.cmd, item.args, checked)
 
-        m_view = self._add_menu(menubar, "查看(&V)")
-        self._action(m_view, "字体…", "", self.choose_font, "font")
-        self.act_wrap = self._action(m_view, "自动换行", "Ctrl+U", self.toggle_wrap, "wrap", checkable=True)
-        self.act_wrap.setChecked(self.settings.word_wrap)
-        self.act_status = self._action(m_view, "状态栏", "", self.toggle_statusbar, "list", checkable=True)
-        self.act_status.setChecked(True)
-        self.act_onscreen = self._action(m_view, "总在最前", "Ctrl+T", self.toggle_always_on_top, "pin", checkable=True)
-        m_view.addSeparator()
-        self.act_reading = self._action(m_view, "阅读模式", "", self.toggle_reading_mode, "read", checkable=True)
-        self.act_scroll = self._action(m_view, "自动卷屏", "", self.toggle_auto_scroll, "scroll", checkable=True)
-        self.act_guide = self._action(m_view, "显示水线", "", self.toggle_guide, "rulers", checkable=True)
-        m_view.addSeparator()
-        self._action(m_view, "统计选定（全部）内容", "", self.show_stats, "stats")
+    def _command_table(self) -> dict:
+        """命令 id → 处理函数：**唯一分发点**（规范 §五.5）。"""
+        table = self.__dict__.get("_cmd_table")
+        if table is not None:
+            return table
+        table = {
+            # 文件
+            "file.new": self.new_file,
+            "file.open": self.open_file,
+            "file.save": self.save_file,
+            "file.save_as": self.save_file_as,
+            "file.reveal": self.reveal_in_explorer,
+            "file.revert": self.revert_to_original,
+            "file.quit": self.close,
+            # 编辑
+            "edit.undo": self.editor_undo,
+            "edit.redo": self.editor_redo,
+            "edit.cut": lambda: self.editor.cut(),
+            "edit.copy": lambda: self.editor.copy(),
+            "edit.paste": lambda: self.editor.paste(),
+            "edit.select_all": lambda: self.editor.selectAll(),
+            "edit.goto": self.run_goto,
+            "edit.find_next": self.find_next,
+            "edit.find_prev": self.find_next,
+            "edit.insert_text": self.insert_text,
+            "edit.insert_date": self.insert_date,
+            "edit.insert_filename": self.insert_filename,
+            "edit.indent_tab": lambda direction: self.indent_selection("tab", direction),
+            "edit.indent_spaces": lambda direction: self.indent_selection(
+                self.settings.indent_kind, direction),
+            "edit.strip_tail": self.strip_tail_spaces,
+            "edit.upper": lambda: self.change_case("upper"),
+            "edit.lower": lambda: self.change_case("lower"),
+            "edit.quotes": self.normalize_quotes,
+            # 查看
+            "view.font": self.choose_font,
+            "view.wrap": self.toggle_wrap,
+            "view.statusbar": self.toggle_statusbar,
+            "view.ontop": self.toggle_always_on_top,
+            "view.reading": self.toggle_reading_mode,
+            "view.autoscroll": self.toggle_auto_scroll,
+            "view.guide": self.toggle_guide,
+            "view.stats": self.show_stats,
+            # 工具
+            "tools.format": self.run_format,
+            "tools.format_options": self.open_settings,
+            "tools.adcheck": self.run_ad_check,
+            "tools.custom_replace": self.run_custom_replace,
+            "tools.find_garbled": self.find_garbled,
+            "tools.fix_garbled": self.fix_garbled,
+            "tools.split": self.run_split_dialog,
+            "tools.merge": self.run_merge_dialog,
+            "tools.recode": self.run_recode,
+            "tools.reopen": self.reopen_with,
+            "tools.reload_regex": self._reload_regex,
+            # 帮助
+            "help.about": self.show_about,
+            "help.email": self.copy_contact,
+        }
+        self._cmd_table = table
+        return table
 
-        m_tools = self._add_menu(menubar, "工具(&T)")
-        self._action(m_tools, "格式整理", "Ctrl+D", self.run_format, "format")
-        self._action(m_tools, "格式整理选项…", "", self.open_settings, "settings")
-        m_tools.addSeparator()
-        self._action(m_tools, "广告检查及字符串计数", "Ctrl+Shift+A", self.run_ad_check, "clean")
-        self._action(m_tools, "自定义替换/删除", "", self.run_custom_replace, "replace")
-        m_tools.addSeparator()
-        self._action(m_tools, "查找乱码", "", self.find_garbled, "search")
-        self._action(m_tools, "修复选定乱码", "", self.fix_garbled, "search")
-        m_tools.addSeparator()
-        self._action(m_tools, "文件分割 / 章节整理…", "", self.run_split_dialog, "split")
-        self._action(m_tools, "文件更名 / 文件合并…", "", self.run_merge_dialog, "merge")
-        self._action(m_tools, "重编码…", "", self.run_recode, "convert")
-        m_tools.addSeparator()
-        self._action(m_tools, "以 ANSI 方式重新打开", "", lambda: self.reopen_with("gb18030"), "reopen")
-        self._action(m_tools, "以 UTF-8 方式重新打开", "", lambda: self.reopen_with("utf-8"), "reopen")
-        self._action(m_tools, "以 Unicode 方式重新打开", "", lambda: self.reopen_with("utf-16-le"), "reopen")
-        m_tools.addSeparator()
-        self._action(m_tools, "重新载入自定义正则", "", self._reload_regex, "refresh")
-
-        # 规范 §八：帮助菜单**只放两项** ——「关于」+ 作者邮箱（直接显示邮箱本身，点了复制）。
-        # 「重新载入自定义正则」是维护动作，挪到「工具」里，不占帮助的位置。
-        m_help = self._add_menu(menubar, "帮助(&H)")
-        self._action(m_help, "关于 " + APP_NAME, "", self.show_about, "info")
-        self._action(m_help, AUTHOR_EMAIL, "", self.copy_contact, "mail")
+    def _dispatch(self, cmd: str, args: tuple = (), checked: bool | None = None) -> None:
+        """按命令 id 分发。可勾选项把新的勾选态作为唯一参数传进去。"""
+        fn = self._command_table().get(cmd)
+        if fn is None:
+            return
+        if checked is not None:
+            fn(checked)
+        elif args:
+            fn(*args)
+        else:
+            fn()
 
     @staticmethod
     def _add_menu(parent, title: str) -> Menu:
@@ -409,25 +480,6 @@ class MainWindow(QMainWindow):
         menu.setTitle(title)
         parent.addMenu(menu)
         return menu
-
-    def _action(self, menu: QMenu, text: str, shortcut: str, slot, icon_name: str = "",
-                checkable: bool = False) -> QAction:
-        action = QAction(text, self)
-        if icon_name:
-            action.setIcon(icons.icon(icon_name, Color.text, 16))
-        if shortcut:
-            action.setShortcut(QKeySequence(shortcut))
-        action.setCheckable(checkable)
-        if checkable:
-            # 规范 §五：可勾选项选中时，在图标列位置显示强调色勾（不显示该项图标）
-            self._sync_check_icon(action, icon_name)
-            action.toggled.connect(lambda _checked, a=action, n=icon_name:
-                                   self._sync_check_icon(a, n))
-            action.toggled.connect(slot)
-        else:
-            action.triggered.connect(slot)
-        menu.addAction(action)
-        return action
 
     @staticmethod
     def _sync_check_icon(action: QAction, icon_name: str) -> None:
@@ -1206,8 +1258,10 @@ class MainWindow(QMainWindow):
         dialog = dialogs.OptionsDialog(self.settings, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.settings.save()
-            self.setStyleSheet(stylesheet() + editor_font_qss(
-                self.settings.font_family, self.settings.font_size, self.settings.line_height_percent))
+            self.setStyleSheet(editor_font_qss(
+                self.settings.font_family, self.settings.font_size,
+                self.settings.line_height_percent, self.settings.font_weight,
+                self.settings.font_italic))
             self.toast.show_message("选项已保存")
 
     def find_garbled(self) -> None:
@@ -1339,46 +1393,24 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- 视图
     def choose_font(self) -> None:
-        from PySide6.QtGui import QFontDatabase
-        from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
-                                       QFontDialog, QPushButton)
-        # 不用静态 getFont 而实例化对话框：要往里面加「恢复默认值」按钮，
-        # 并把窗口撑大一点（原生尺寸偏小，用户提过）。
-        # PySide6 的 getFont 返回 (ok, font)，和常见 PyQt 教程里的 (font, ok)
-        # 正好相反 —— 按教程解包，点「确定」后 font 是个 bool，一调
-        # .family() 就崩（实测 'bool' object has no attribute 'family'）。
-        # 实例化 + exec() + selectedFont() 不经过那个坑。
-        dialog = QFontDialog(QFont(self.settings.font_family, int(self.settings.font_size)), self)
-        # 必须强制 Qt 自绘对话框：Windows 上 QFontDialog 可能走原生 ChooseFont
-        # （Win32 ChooseFont），那样下面的自定义按钮和写作系统设置全都会失效。
-        dialog.setOption(QFontDialog.FontDialogOption.DontUseNativeDialog)
-        dialog.setWindowTitle("选择字体")
-        dialog.resize(int(dialog.width() * 1.18) + 40, int(dialog.height() * 1.15) + 24)
-        box = dialog.findChild(QDialogButtonBox)
-        # 「书写系统」下拉是 QComboBox（实测不是 QFontComboBox，别找错类）
-        ws_combo = dialog.findChild(QComboBox)
-        if box is not None:
-            def restore_default() -> None:
-                # 出厂默认：简体中文 · 黑体 · 14 号（写作系统一并切过去，
-                # 字体列表里才找得到黑体）
-                if ws_combo is not None:
-                    ws_combo.setCurrentIndex(
-                        QFontDatabase.WritingSystem.SimplifiedChinese.value)
-                dialog.setCurrentFont(QFont(DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE))
-
-            btn = QPushButton("恢复默认值")
-            box.addButton(btn, QDialogButtonBox.ButtonRole.ResetRole)
-            btn.clicked.connect(restore_default)
+        # 自绘字体对话框（规范 §七.2）：Qt 内置 QFontDialog 即便强制
+        # DontUseNativeDialog，仍是 Qt 默认外观（英文标签、系统配色按钮、
+        # 可自由拉伸），与这套界面不同族。外观在 app/ui/fontdialog.py。
+        dialog = FontDialog(self.settings.font_family, int(self.settings.font_size),
+                            self.settings.font_weight, self.settings.font_italic,
+                            self.settings.line_height_percent, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        font = dialog.selectedFont()
-        self.settings.font_family = font.family()
-        # 选了点阵/位图字体时 pointSize 可能是 -1，别把字号打成负数
-        self.settings.font_size = max(7, font.pointSize())
+        family, size, weight, italic, line_percent = dialog.selected()
+        self.settings.font_family = family
+        self.settings.font_size = max(7, size)
+        self.settings.font_weight = weight
+        self.settings.font_italic = italic
+        self.settings.line_height_percent = line_percent
         # 只调这一个入口：它会 emit font_changed → _apply_editor_font_qss 刷新 QSS。
-        # 原来这里还额外 setStyleSheet 一次，同一件事两条路径，改一处必漏另一处。
         self.editor.set_editor_font(self.settings.font_family, self.settings.font_size,
-                                    self.settings.line_height_percent)
+                                    self.settings.line_height_percent,
+                                    self.settings.font_weight, self.settings.font_italic)
 
     def toggle_wrap(self, checked: bool) -> None:
         self.settings.word_wrap = checked
@@ -1424,7 +1456,8 @@ class MainWindow(QMainWindow):
         字体也自此只有一条生效路径：editor.set_editor_font → font_changed → 这里。
         """
         self.editor.setStyleSheet(editor_font_qss(
-            family, size, self.settings.line_height_percent))
+            family, size, self.settings.line_height_percent,
+            self.settings.font_weight, self.settings.font_italic))
 
     def toggle_auto_scroll(self, checked: bool) -> None:
         self.editor.set_auto_scroll(checked)

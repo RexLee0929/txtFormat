@@ -362,14 +362,16 @@ class FilePanel(QWidget):
         # 圆角 8px 却没有 mask 处理，四个角会合成出黑色像素（与菜单栏弹层同款问题）。
         menu = Menu(self)
         if selected:
-            act_open = QAction(icons.icon("open"), "打开", self)
+            act_open = QAction(icons.icon("open", Color.text, 16), "打开", self)
             act_open.triggered.connect(lambda: self.file_activated.emit(selected[0]))
             menu.addAction(act_open)
             menu.addSeparator()
-            menu.addAction(QAction(icons.icon("rename"), "文件更名…", self, triggered=self._rename_selected))
-            menu.addAction(QAction(icons.icon("close"), "从列表移除（不删除文件）", self,
+            menu.addAction(QAction(icons.icon("edit", Color.text, 16), "文件更名…", self,
+                                   triggered=self._rename_selected))
+            menu.addAction(QAction(icons.icon("close", Color.text, 16), "从列表移除（不删除文件）", self,
                                    triggered=self._remove_selected))
-            menu.addAction(QAction(icons.icon("trash"), "删除文件…", self, triggered=self._delete_selected))
+            menu.addAction(QAction(icons.icon("trash", Color.text, 16), "删除文件…", self,
+                                   triggered=self._delete_selected))
             menu.addSeparator()
             menu.addAction(QAction("删除文件名前面 3 个字符", self,
                                    triggered=lambda: self._rename_ops("prefix", 3)))
@@ -383,7 +385,7 @@ class FilePanel(QWidget):
             menu.addAction(QAction("按文件名排序", self, triggered=self._sort_by_name))
             menu.addAction(QAction("按文件名中的数字排序", self, triggered=self._sort_by_number))
         else:
-            menu.addAction(QAction(icons.icon("folder"), "选择文件夹…", self, triggered=self._pick_dir))
+            menu.addAction(QAction(icons.icon("folder", Color.text, 16), "选择文件夹…", self, triggered=self._pick_dir))
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _sort_by_name(self) -> None:

@@ -189,20 +189,24 @@ def _seed_from_pixels(px: list[tuple[int, int, int, int]]) -> tuple[float, float
 
 
 def derive(h: float, s: float) -> dict[str, str]:
-    """由 (H, S) 派生四个用途色（规范 §三 的公式表）。
+    """由 (H, S) 派生**实际会用到**的两个用途色（规范 §三 的公式表）。
 
     | 用途 | 公式 |
     |---|---|
     | 强调色 | ``HSL(H, min(S·1.05, .95), .245)`` |
-    | 强调暗 | ``HSL(H, min(S·1.10, .95), .175)`` |
     | 浅底 | ``HSL(H, .32, .93)`` |
-    | 微光悬停 | ``HSL(H, .28, .96)`` |
+
+    规范表里还列了「强调暗」与「微光悬停」两列，这里**不再算**：
+
+    * 按下态用 ``theme.accent_pressed()``（把强调色压暗 12%），不需要另派生一个；
+    * 悬停态按 §八 明令「实心主按钮悬停不变色」，本来就不该有颜色。
+
+    留着这两个值会让人以为界面上真的用到了，换图标时也白算一遍。
     """
-    accent = _from_hsl(h, min(s * 1.05, 0.95), 0.245)
-    dark = _from_hsl(h, min(s * 1.10, 0.95), 0.175)
-    soft = _from_hsl(h, 0.32, 0.93)
-    hover = _from_hsl(h, 0.28, 0.96)
-    return {"accent": accent, "dark": dark, "soft": soft, "hover": hover}
+    return {
+        "accent": _from_hsl(h, min(s * 1.05, 0.95), 0.245),
+        "soft": _from_hsl(h, 0.32, 0.93),
+    }
 
 
 def palette() -> dict[str, str]:

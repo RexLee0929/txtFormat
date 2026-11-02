@@ -109,21 +109,27 @@ class TextEditor(QPlainTextEdit):
             number += 1
 
     # ------------------------------------------------------------ 外观
-    def _apply_font(self, family: str, size_pt: float) -> None:
+    def _apply_font(self, family: str, size_pt: float,
+                    weight: int = 400, italic: bool = False) -> None:
         """固定字号到 0.5pt 台阶；实际绘制字号由主窗口用 QSS 同步（QSS 优先级高于 setFont）。"""
         size = round(float(size_pt) * 2) / 2
         font = QFont(family)
         font.setPointSizeF(size)
+        font.setWeight(QFont.Weight(int(weight)))
+        font.setItalic(bool(italic))
         font.setStyleStrategy(QFont.StyleStrategy.PreferDefault)   # 交给系统做 ClearType
         self.setFont(font)
         self.setTabStopDistance(QFontMetricsF(font).horizontalAdvance("　") * 2)
         self._font_family = family
         self._font_size = size
+        self._font_weight = int(weight)
+        self._font_italic = bool(italic)
         self.font_changed.emit(family, size)
 
-    def set_editor_font(self, family: str, size_pt: float, line_percent: int = 160) -> None:
+    def set_editor_font(self, family: str, size_pt: float, line_percent: int = 160,
+                        weight: int = 400, italic: bool = False) -> None:
         self._line_percent = line_percent
-        self._apply_font(family, size_pt)
+        self._apply_font(family, size_pt, weight, italic)
         self.document().setDocumentMargin(6)
         self._update_area_width()
         self.stats_changed.emit()
@@ -230,7 +236,9 @@ class TextEditor(QPlainTextEdit):
 
     def zoom_by(self, delta: float) -> None:
         size = max(7.0, min(36.0, getattr(self, "_font_size", 11.0) + delta))
-        self._apply_font(getattr(self, "_font_family", "Microsoft YaHei UI"), size)
+        self._apply_font(getattr(self, "_font_family", "Microsoft YaHei UI"), size,
+                         getattr(self, "_font_weight", 400),
+                         getattr(self, "_font_italic", False))
         self._update_area_width()
 
 

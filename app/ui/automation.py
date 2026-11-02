@@ -45,7 +45,7 @@ class AutomationPanel(QWidget):
         header.addWidget(SectionLabel("自动化"))
         header.addStretch(1)
         self.btn_new = IconButton("plus", "新建自动化", size=28)
-        self.btn_edit = IconButton("rename", "编辑当前自动化", size=28)
+        self.btn_edit = IconButton("edit", "编辑当前自动化", size=28)
         self.btn_del = IconButton("trash", "删除当前自动化", size=28)
         self.btn_new.clicked.connect(self._new)
         self.btn_edit.clicked.connect(self._edit)
@@ -154,7 +154,7 @@ class AutomationDialog(BaseDialog):
 
     def __init__(self, parent: QWidget | None, task: dict | None,
                  taken_names: list[str] | None = None):
-        super().__init__("编辑自动化" if task else "新建自动化", parent, 560)
+        super().__init__("编辑自动化" if task else "新建自动化", parent)
         self._taken = set(taken_names or ())
         self._original_name = task.get("name") if task else None
         self._steps: list[dict] = deepcopy(task.get("steps")) if task else []
@@ -306,7 +306,7 @@ class ReplaceStepDialog(BaseDialog):
     """「查找替换」步骤的选项。"""
 
     def __init__(self, config: dict, parent: QWidget | None = None):
-        super().__init__("自动化步骤：查找替换", parent, 560)
+        super().__init__("自动化步骤：查找替换", parent)
         self._config = dict(config)
 
         self.root.addWidget(SectionLabel("查找内容"))
@@ -326,7 +326,7 @@ class ReplaceStepDialog(BaseDialog):
         self.root.addWidget(self.regex_check)
         self.root.addWidget(self.case_check)
 
-        self.add_footer("确定")
+        self.add_footer("保存")
 
     def config(self) -> dict:
         self._config.update({
@@ -342,7 +342,7 @@ class ZhconvStepDialog(BaseDialog):
     """「简繁转换」步骤的选项。"""
 
     def __init__(self, config: dict, parent: QWidget | None = None):
-        super().__init__("自动化步骤：简繁转换", parent, 380)
+        super().__init__("自动化步骤：简繁转换", parent)
         self._config = dict(config)
         self.root.addWidget(QLabel("选择转换方向："))
         self.combo = QComboBox()
@@ -351,7 +351,7 @@ class ZhconvStepDialog(BaseDialog):
         index = self.combo.findData(config.get("mode", "t2s"))
         self.combo.setCurrentIndex(max(0, index))
         self.root.addWidget(self.combo)
-        self.add_footer("确定")
+        self.add_footer("保存")
 
     def config(self) -> dict:
         self._config["mode"] = str(self.combo.currentData())

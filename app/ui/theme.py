@@ -25,6 +25,46 @@ def _assets_dir() -> str:
 
 
 _TICK_PATH: str | None = None
+_ARROWS: dict[str, str] = {}          # 文件名 → 绝对路径缓存
+
+
+def _arrow_png(name: str, angle: float, filename: str) -> str:
+    """把 icons 表里的 ``next``（右箭头）旋转 ``angle`` 度存成 PNG，返回路径。
+
+    QSS 的 ``image: url()`` 只能引用文件，所以箭头都要先落盘；生成手法与
+    :func:`tick_icon_path` 相同。QSS 定制过 drop-down / 上下按钮后 Qt 不再
+    画默认箭头（实测：下拉框看着像输入框、字号框没有微调箭头），箭头不许
+    另画 —— 全部从同一支右箭头旋转得来，笔画粗细与全套图标一致。
+    """
+    cached = _ARROWS.get(filename)
+    if cached and os.path.exists(cached):
+        return cached
+    path = os.path.join(_assets_dir(), filename)
+    if not os.path.exists(path):
+        from PySide6.QtGui import QTransform
+
+        from . import icons          # 局部导入：icons.py 反过来要 import 本模块的 Color/ACCENT
+
+        pm = icons.pixmap("next", Color.text_secondary, 13)
+        arrow = pm.transformed(QTransform().rotate(angle))
+        arrow.save(path, "PNG")
+    full = path.replace("\\", "/")
+    _ARROWS[filename] = full
+    return full
+
+
+def combo_arrow_path() -> str:
+    """下拉框的向下箭头 PNG 路径（右箭头顺时针转 90°）。"""
+    return _arrow_png("next", 90, "combo_arrow.png")
+
+
+def spin_arrow_path(direction: str) -> str:
+    """SpinBox 微调按钮的箭头 PNG 路径：``up`` 逆时针 90°、``down`` 顺时针 90°。"""
+    if direction == "up":
+        return _arrow_png("next", -90, "spin_up.png")
+    if direction == "down":
+        return _arrow_png("next", 90, "spin_down.png")
+    raise ValueError(f"未知方向: {direction}")
 
 
 def tick_icon_path() -> str:
@@ -38,12 +78,11 @@ def tick_icon_path() -> str:
         from PySide6.QtGui import QPainter, QPixmap
         from PySide6.QtSvg import QSvgRenderer
 
-        svg = (
-            '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" '
-            'fill="none" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" '
-            'stroke-linejoin="round"><path d="M3.5 8.4l3 3 5.8-6.2"/></svg>'
-        )
-        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        from . import icons          # 局部导入：icons.py 反过来要 import 本模块的 Color/ACCENT
+
+        # 勾就是 icons 里的 check（《图标规范》§七：不许另画一个勾）。
+        # 笔宽按 16px 算（1.575），再放大 2 倍渲染 —— 同 pixmap() 的超采样手法。
+        renderer = QSvgRenderer(QByteArray(icons.svg("check", "#FFFFFF", 16).encode("utf-8")))
         pm = QPixmap(32, 32)
         pm.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pm)
@@ -70,6 +109,10 @@ class Color:
     hoverline = "#E8E8E8"
     disabled = "#B5B5B5"
     editor_bg = "#FFFFFF"
+    # 状态栏比窗口底色深一档（规范 §六：状态栏是「运行仪表」，得和内容区分开）。
+    # 窗口底 #F3F3F3 → 状态栏 #EEEEEE + 上边线 #E0E0E0，仍在同一套灰阶里。
+    status_bg = "#EEEEEE"
+    status_line = "#E0E0E0"
     # selection 已按规范 §三 改由图标派生（ACCENT_SOFT），不再写死 #CCE4F7；
     # success 未使用，已删除 —— 语义色只保留 danger / warning（规范 §七.2）。
     danger = "#C42B1C"
@@ -86,12 +129,11 @@ _PALETTE = _icon_palette()
 
 #: 强调色（主按钮底、勾选、链接、选中胶囊、输入框聚焦边、进度条）
 ACCENT = _PALETTE["accent"]
-#: 强调暗（按下态）
-ACCENT_DARK = _PALETTE["dark"]
 #: 浅底（选中胶囊、轻提示）
 ACCENT_SOFT = _PALETTE["soft"]
-#: 微光悬停
-ACCENT_HOVER_BG = _PALETTE["hover"]
+# 曾在这里导出 ACCENT_DARK 与 ACCENT_HOVER_BG，全仓各只用了一次（就是定义那一行）：
+# 前者被 ACCENT_PRESSED 取代，后者在规范 §八 明令「实心主按钮悬停不变色」后失去用途。
+# 留着会让下次换图标时白算一遍，也让人误以为界面上真的用到了。
 
 
 def accent_color() -> str:
@@ -111,17 +153,13 @@ def mix(hex_a: str, hex_b: str, ratio: float) -> str:
     return "#{:02X}{:02X}{:02X}".format(*out)
 
 
-def accent_hover() -> str:
-    """强调色悬停态（提亮一档）。"""
-    return mix(ACCENT, "#FFFFFF", 0.10)
-
-
 def accent_pressed() -> str:
     """强调色按下态（压暗一档）。"""
     return mix(ACCENT, "#000000", 0.12)
 
 
-ACCENT_HOVER = accent_hover()
+# 曾经还有个 accent_hover()（提亮 10%）—— 已删除：规范 §八 要求
+# 「实心主按钮悬停**不变色**，只有按下时加深」，提亮会让实心块像状态翻转。
 ACCENT_PRESSED = accent_pressed()
 
 
@@ -132,7 +170,6 @@ def stylesheet() -> str:
     s = lambda v: max(1, round(v))          # noqa: E731
     # 强调色在这里才取值 —— stylesheet() 一定在 QApplication 之后才被调用
     ACCENT = accent_color()
-    ACCENT_HOVER = accent_hover()
     ACCENT_PRESSED = accent_pressed()
     ACCENT_SOFT = _PALETTE["soft"]
     return f"""
@@ -211,7 +248,9 @@ QPushButton[kind="primary"] {{
     border: none;
     font-weight: 600;
 }}
-QPushButton[kind="primary"]:hover {{ background: {ACCENT_HOVER}; }}
+/* 悬停**保持原色**（规范 §八）：实心色块一变亮就像状态翻转，会被当成 bug。
+   必须显式写回 ACCENT —— 否则会掉进下面通用的 QPushButton:hover，变成浅灰底。 */
+QPushButton[kind="primary"]:hover {{ background: {ACCENT}; }}
 QPushButton[kind="primary"]:pressed {{ background: {ACCENT_PRESSED}; }}
 QPushButton[kind="primary"]:disabled {{ background: {Color.border_strong}; color: #FFFFFF; }}
 
@@ -265,20 +304,22 @@ QLineEdit:disabled, QComboBox:disabled {{ color: {Color.disabled}; background: {
 
 QComboBox {{ padding: {s(4)}px {s(9)}px; min-height: {s(24)}px; }}
 QComboBox::drop-down {{ border: none; width: {s(26)}px; }}
-/* 弹层：边框与圆角交给容器（QComboBoxPrivateContainer）画，
-   列表视图自身不画边框/内边距——两处都画就会出现"双层边框 + 缺角"的错层。
-   容器里那条 QComboBoxPrivateScroller 横带由 CompactComboBox 在运行时代码移除。 */
-QComboBoxPrivateContainer {{
-    background: {Color.card};
-    border: 1px solid {Color.border};
-    border-radius: {s(8)}px;
-    padding: 0px;
-    margin: 0px;
+/* 定制过 ::drop-down 后 Qt 不再画默认箭头（不写这条，所有下拉框看着像
+   输入框 —— 字体选择框被当成「有问题」报过）。箭头 = icons 的 next 旋转 90°。 */
+QComboBox::down-arrow {{
+    width: {s(10)}px; height: {s(10)}px;
+    image: url({combo_arrow_path()});
 }}
+/* 弹层：边框画在列表视图上（radius 7），容器只铺白底并把整个卡片内收
+   1px（CompactComboBox 设置布局边距）。两条弧同心：mask 8px（窗口）→
+   视图边框 7px（内收 1px）。边框不画在容器窗口边缘的原因见 widgets.py ——
+   最外 1px 会被 DWM 栅格化吃掉（右缘整个消失）。
+   另：app 级 ``QComboBoxPrivateContainer`` 选择器匹配不到私有容器（死代码），
+   别再往那儿写样式。 */
 QComboBox QAbstractItemView {{
     background: {Color.card};
-    border: none;
-    border-radius: 0px;
+    border: 1px solid {Color.border};
+    border-radius: {s(7)}px;
     /* 内边距让条目从容器圆角/边框里缩进一圈：原先条目通到边上，
        选中项的外框贴着弹层边框，看着像套了两层框 */
     padding: {s(4)}px;
@@ -298,10 +339,22 @@ QComboBox QAbstractItemView::item:selected {{
     background: {ACCENT_SOFT};
     color: {Color.text};
 }}
-QSpinBox::up-button, QSpinBox::down-button {{
-    width: {s(18)}px;
-    border: none;
-    background: transparent;
+/* 定制过 up/down 按钮后 Qt 不画默认箭头（字号框曾被当成「坏了」）。
+   两支箭头同样由 icons 的 next 旋转得来，不另画图标。 */
+QSpinBox::up-button {{
+    subcontrol-origin: border; subcontrol-position: top right;
+    width: {s(17)}px; border: none; background: transparent;
+}}
+QSpinBox::down-button {{
+    subcontrol-origin: border; subcontrol-position: bottom right;
+    width: {s(17)}px; border: none; background: transparent;
+}}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: {Color.hover}; }}
+QSpinBox::up-arrow {{
+    image: url({spin_arrow_path("up")}); width: {s(9)}px; height: {s(9)}px;
+}}
+QSpinBox::down-arrow {{
+    image: url({spin_arrow_path("down")}); width: {s(9)}px; height: {s(9)}px;
 }}
 
 /* -------------------------------------------------- 单选/复选 */
@@ -347,6 +400,14 @@ QListWidget::item:hover, QTreeWidget::item:hover {{ background: {Color.hover}; }
 QListWidget::item:selected, QTreeWidget::item:selected {{
     background: {ACCENT_SOFT};
     color: {Color.text};
+}}
+/* 字体选择器的族名列表：每条用自身字体渲染（FontRole），行高必须统一 ——
+   不同字体的行高天然差 1~3px，不钉死就会参差不齐 */
+QListWidget#FontList {{ padding: {s(4)}px; }}
+QListWidget#FontList::item {{
+    min-height: {s(24)}px;
+    padding: {s(3)}px {s(8)}px;
+    border-radius: {s(4)}px;
 }}
 /* 常用正则表达式：常驻固定列表，行高固定、不出现横向滚动条 */
 QListWidget[role="regex-list"] {{
@@ -408,8 +469,8 @@ QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 
 /* -------------------------------------------------- 其它 */
 QStatusBar {{
-    background: {Color.window};
-    border-top: 1px solid {Color.border};
+    background: {Color.status_bg};
+    border-top: 1px solid {Color.status_line};
     color: {Color.text_secondary};
 }}
 QStatusBar::item {{ border: none; }}
@@ -495,7 +556,9 @@ def apply_dwm_chrome(hwnd: int | None = None) -> None:
         pass
 
 
-def editor_font_qss(family: str, size_pt: float, line_percent: int) -> str:
+def editor_font_qss(family: str, size_pt: float, line_percent: int,
+                    weight: int = 400, italic: bool = False) -> str:
+    style = "italic" if italic else "normal"
     return f"""
 QPlainTextEdit[role="editor"] {{
     background: {Color.editor_bg};
@@ -504,6 +567,8 @@ QPlainTextEdit[role="editor"] {{
     padding: 10px 14px;
     font-family: "{family}";
     font-size: {size_pt:.1f}pt;
+    font-weight: {int(weight)};
+    font-style: {style};
     line-height: {line_percent}%;
     selection-background-color: {ACCENT_SOFT};
     selection-color: {Color.text};
@@ -512,6 +577,6 @@ QPlainTextEdit[role="editor"] {{
 """
 
 
-__all__ = ["Color", "ACCENT", "ACCENT_HOVER", "ACCENT_PRESSED", "FONT_FAMILY",
+__all__ = ["Color", "ACCENT", "ACCENT_PRESSED", "FONT_FAMILY",
            "stylesheet", "editor_font_qss", "mix", "apply_dwm_chrome",
-           "accent_color", "accent_hover", "accent_pressed"]
+           "accent_color", "accent_pressed"]

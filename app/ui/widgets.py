@@ -6,8 +6,8 @@ import sys
 
 from PySide6.QtCore import (QEvent, QPoint, QPropertyAnimation, QRect, QRectF,
                             QSize, Qt, QTimer, Signal)
-from PySide6.QtGui import (QColor, QFont, QKeySequence, QPainter, QPainterPath,
-                           QPen, QRegion)
+from PySide6.QtGui import (QColor, QFont, QImage, QFontMetrics, QKeySequence,
+                           QPainter, QPainterPath, QPen, QRegion)
 from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGraphicsOpacityEffect,
                                QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
@@ -208,21 +208,77 @@ class CompactComboBox(QComboBox):
         # 宽度按内容算（不受"当前项 + 省略号"挤压）
         self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.view().setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 弹层容器的两个系统级坑（Menu 同款，实测复现过）：
+        # ① 底边下方的「怪阴影」：Windows 给弹出窗口画的 CS_DROPSHADOW。
+        #    setMask 裁不到它 —— 投影画在窗口矩形**之外**，只能用
+        #    NoDropShadowWindowHint 让 Qt 别开。注意要用复数 setWindowFlags：
+        #    PySide6 6.12 里单数 setWindowFlag 对这个提示位不生效（Menu 踩过）。
+        # ② 边缘像素残缺：Win11 会自动给弹出窗口套 DWM 圆角裁切，和自绘
+        #    8px 圆角 mask 叠加成双重圆角，角上切出锯齿缺口。显示后要用
+        #    DWMWA_WINDOW_CORNER_PREFERENCE=DONOTROUND 关掉（见 _dwm_no_round）。
+        container = self.view().window()
+        container.setWindowFlags(
+            container.windowFlags() | Qt.WindowType.NoDropShadowWindowHint)
+        container.setAutoFillBackground(True)
+        pal = container.palette()
+        pal.setColor(container.backgroundRole(), QColor(Color.card))
+        container.setPalette(pal)
+        # 边框不能直接画在容器窗口边缘：控件自身 grab 四边都有边框，但屏幕
+        # 合成时最外 1 逻辑 px 正好压在原生窗口边缘上，被 DWM 栅格化吃掉
+        # 一半（实测右缘整个消失、其余三边发暗）→ 容器只留白底，用布局
+        # 边距把整个卡片内收 1px，边框改画在列表视图上（theme.py 的
+        # QComboBox QAbstractItemView，radius 7 与 mask 的 8 同心）。
+        # 注意：app 级 QSS 的 ``QComboBoxPrivateContainer`` 选择器不匹配
+        # （离屏红底实测染不上，theme.py 里曾写成死代码），样式必须挂在
+        # 容器实例上；用 ID 选择器而不是裸声明，裸声明会级联到列表。
+        container.setObjectName("ComboPopupCard")
+        container.setStyleSheet(f"#ComboPopupCard {{ background: {Color.card}; }}")
+        lay = container.layout()
+        if lay is not None:
+            lay.setContentsMargins(1, 1, 1, 1)
+        # 滚动过程 Qt 也会把上下提示箭头重新显示出来（updateScrollers 随
+        # viewport 滚动调用），每次滚动后再压一次
+        bar = self.view().verticalScrollBar()
+        bar.valueChanged.connect(lambda _v: self._hide_scrollers(self.view().window()))
+
+    #: 弹层宽度下限：字段特别窄时也不至于挤成一条省略号
+    POPUP_MIN_WIDTH = 80
 
     def _popup_width(self) -> int:
-        """弹层宽度：所有项里最宽那条 + 左右内边距，与当前选中项无关。"""
-        if not self.count():
-            return self.width()
-        view = self.view()
-        widest = max(view.sizeHintForColumn(i) for i in range(self.count()))
-        # QSS 里 item 左右各 10px 内边距 + 视图 4px 内边距 + 1px 边框
-        return max(self.width(), widest + 30)
+        """弹层宽度 = 唤起它的那个框的宽度（严格同宽）。
+
+        早先取「最宽项 + 内边距」再用 ``max(字段宽, …)`` 兜底，想的是
+        「条目不被截断」。但条目宽度由字体与系统缩放决定，在别人的机器上
+        算出来比字段宽 —— 弹层就比框宽出半截、压到旁边的控件上；本机恰好
+        没超过字段宽，所以一直没复现（用户两次报「还是超了」正是这个）。
+        现在宽度只由字段决定，条目过长走右侧省略号，悬停按 tooltip 看全文。
+        """
+        return max(self.POPUP_MIN_WIDTH, self.width())
 
     def showPopup(self) -> None:               # noqa: N802 - Qt 命名
         # 宽度必须在弹出**之前**定：弹出后 Qt 已按旧尺寸算过摆放，再改尺寸
         # 会让同一次展开的位置与上一次不一致。
-        self.view().setMinimumWidth(self._popup_width())
+        want_w = self._popup_width()
+        view = self.view()
+        # 最小/最大宽度一起钉死：只给下限时 Qt 仍会按 sizeHint（最宽条目）
+        # 把弹层撑大，上限才真正封住它。注意钉的是**内容区**宽（弹层宽减去
+        # 容器左右各 1px 布局边距）——钉成弹层全宽的话视图比内容区宽 2px，
+        # 会溢出盖住右缘边框（实测右缘边框整个消失）。
+        inner_w = max(1, want_w - 2)
+        view.setMinimumWidth(inner_w)
+        view.setMaximumWidth(inner_w)
+        view.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self._apply_item_tooltips(want_w)
         super().showPopup()
+        popup = self.view().window()
+        if popup is not None:
+            # QComboBoxPrivateContainer 会在 Show / 布局激活后按视图 sizeHint
+            # 再 adjustSize 一次，弹出后立刻 resize 压不住（跨环境时序不同，
+            # 本机压得住、别人机器上被撑回）。挂事件过滤器兜底。
+            popup.installEventFilter(self)
+            self._dwm_no_round(popup)
+        self._fit_popup(popup)
+        self._hide_scrollers(popup)
         # 位置是唯一没法交给 Qt 的：列表需要滚动时，Qt 会把弹层整体挪动，
         # 让「当前选中项」正好贴在下拉框旁边 —— 于是选中的项不同，弹层就跳一截
         # （用户实测报过「选一项再展开，整个框位置变了」）。这里在弹出后把弹层
@@ -230,10 +286,94 @@ class CompactComboBox(QComboBox):
         self._place_popup()
         QTimer.singleShot(0, self._place_popup)     # Qt 有时在下一拍再摆一次
 
+    def _popup_size(self) -> tuple[int, int]:
+        """弹层的目标尺寸：宽 = 字段宽（严格同宽），高 ≤ rows 行。"""
+        view = self.view()
+        row_h = view.sizeHintForRow(0)
+        if not row_h or row_h <= 0:
+            row_h = view.fontMetrics().height() + 12
+        # 竖向余量：容器布局边距 1 + 视图边框 1 + 视图内边距 4 = 每侧 6
+        max_h = min(self._rows, max(1, self.count())) * row_h + 12
+        return self._popup_width(), max_h
+
+    def _apply_item_tooltips(self, width: int) -> None:
+        """宽被钉成字段宽之后，长条目只能省略显示 —— 悬停时给出全文。"""
+        fm = self.view().fontMetrics()
+        limit = max(0, width - 28)          # 减去 item 左右内边距与省略号余量
+        for i in range(self.count()):
+            text = self.itemText(i)
+            tip = text if fm.horizontalAdvance(text) > limit else ""
+            if (self.itemData(i, Qt.ItemDataRole.ToolTipRole) or "") != tip:
+                self.setItemData(i, tip, Qt.ItemDataRole.ToolTipRole)
+
+    def _fit_popup(self, popup) -> None:
+        """把弹层尺寸钉死：宽度精确等于字段宽，高度只封上限。
+
+        用 ``setFixedSize`` 而不是 ``resize``：容器在布局激活后会按视图
+        sizeHint 再 ``adjustSize`` 一次（实测把 104 的弹层撑成 106），
+        resize 只是"这一刻"生效，min/max 才能一直压住它。
+        """
+        if popup is None or not popup.isVisible():
+            return
+        want_w, want_h = self._popup_size()
+        height = popup.height() if popup.height() > 0 else want_h
+        if height > want_h:
+            height = want_h
+        if popup.width() != want_w or popup.height() != height:
+            popup.setFixedSize(want_w, height)
+
+    def _hide_scrollers(self, popup) -> None:
+        """隐藏 Qt 给超长列表插的上下滚动提示箭头（顶/底各一条灰带）。
+
+        列表条目数超过 :attr:`_rows` 时，QComboBox 会往弹层里塞两个
+        ``QComboBoxPrivateScroller``（私有类，样式表够不着），用户报「太丑」。
+        滚动本身由右侧滚动条承担，这两个提示纯属多余。Qt 在 Show/Resize/
+        滚动时都可能重新显示它们，所以除了弹出时隐藏，滚动时也要再压一次。
+        """
+        if popup is None:
+            return
+        for child in popup.findChildren(QWidget):
+            if child.metaObject().className() == "QComboBoxPrivateScroller":
+                child.setFixedHeight(0)
+                child.hide()
+
+    def eventFilter(self, obj, event):         # noqa: N802 - Qt 命名
+        # 弹层容器在 Show / 尺寸变化后会自己 adjustSize（按视图 sizeHint 撑大）。
+        # 单次 resize 压不住，跨环境时序还不一样（本机压得住、用户机器上被撑回），
+        # 所以在容器上兜底：每次 Show / Resize 后都拉回目标宽度。
+        if obj is self.view().window() and event.type() in (
+                QEvent.Type.Show, QEvent.Type.Resize):
+            self._fit_popup(obj)
+            self._hide_scrollers(obj)
+        return super().eventFilter(obj, event)
+
+    def _dwm_no_round(self, popup) -> None:
+        """关掉 Win11 对弹层窗口的自动圆角裁切（边缘残缺的另一半真因）。
+
+        DWM 自动圆角和自绘 8px mask 是两道不同心的弧，叠加后在角上切出
+        锯齿缺口（用户报「边缘像素也有残缺」）。显示后（winId 已创建）
+        明确告诉 DWM「不要动我的圆角」，形状完全交给 setMask。
+        只需设一次，属性随窗口存活。
+        """
+        if sys.platform != "win32" or getattr(self, "_dwm_no_round_done", False):
+            return
+        self._dwm_no_round_done = True
+        try:
+            import ctypes
+            hwnd = int(popup.winId())
+            pref = ctypes.c_int(1)              # DWMWCP_DONOTROUND
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                ctypes.c_void_p(hwnd), ctypes.c_uint(33),   # DWMWA_WINDOW_CORNER_PREFERENCE
+                ctypes.byref(pref), ctypes.sizeof(pref))
+        except Exception:                       # noqa: BLE001 - 老系统没有 DWM 就跳过
+            self._dwm_no_round_done = False
+
     def _place_popup(self) -> None:
         popup = self.view().window()
         if popup is None or not self.isVisible():
             return
+        # 尺寸再钳一次：Qt 可能在布局激活的下一拍把弹层撑回 sizeHint。
+        self._fit_popup(popup)
         # 弹层是「圆角容器 + 方角列表」叠出来的：列表把容器的圆角盖住，
         # 四角与选中项通到边上就成了「双层框」。和 Menu 同一套釜底抽薪 ——
         # setMask 把窗口直接裁成圆角，方角像素根本不存在。
@@ -502,6 +642,8 @@ class Menu(QMenu):
     * 条目：悬停 `#F5F5F5` 圆角 4、禁用 0.45 透明度；
     * 图标列：图标墨迹从弹层 x≈17 画到 x≈33（16×16 在 22px 列内居中），
       文本左缘距弹层左缘 48px（1 边框 + 5 内边距 + 42 + 22 图标列（取整后文本左缘 48））；
+    * 竖直光学对齐：图标/勾/子菜单箭头的中心跟**文字墨迹中心**走
+      （雅黑的 descent 对纯中文是空的，几何居中会让图标偏低 1.5~2px，实测）；
     * 可勾选项：14×14 强调色勾画在图标列正中，与该项图标互斥显示；
     * 快捷键右对齐 `#8A8A8A`；分隔线 1px `#E1E1E1`、左右各留 10。
     """
@@ -593,6 +735,45 @@ class Menu(QMenu):
             self._draw_item(p, action, rect)
         p.end()
 
+    #: 文字墨迹中心相对条目几何中心的偏移缓存（键 = 字体族/字号/条目高）
+    _INK_DY_CACHE: dict[tuple, int] = {}
+
+    def _text_ink_dy(self, item_h: int) -> int:
+        """文字墨迹中心相对条目矩形中心的偏移（px，负 = 墨迹偏上）。
+
+        雅黑这类字体的 descent 对纯中文菜单项是空的 —— 墨迹全部落在基线
+        上方，如果图标按条目矩形几何居中，就会比文字低 1.5~2px（实测，
+        正是「菜单图标和文字有偏离」的来源）。这里把采样文字按与
+        _draw_item 相同的基线公式渲到离屏图上量一次墨迹中心，结果按字体
+        缓存；图标、勾、子菜单箭头统一用这个偏移做光学对齐。
+        """
+        font = self.font()
+        dpr = self.devicePixelRatioF()
+        key = (font.family(), font.pixelSize(), font.pointSizeF(), item_h, dpr)
+        cached = self._INK_DY_CACHE.get(key)
+        if cached is not None:
+            return cached
+        fm = QFontMetrics(font)
+        sample = "新建打开保存退出查看工具"      # 覆盖常用的 CJK 墨迹高度
+        width = max(fm.horizontalAdvance(sample) + 8, 40)
+        # 白底 + 暗度阈值：与像素级验收脚本同口径（透明底 + alpha 阈值会把
+        # 抗锯齿的淡边算进墨迹）。渲染尺寸乘 DPR —— 1x 图上量出的墨迹中心和
+        # 2x 屏幕栅格化的不一样（hinting 舍入差 ~1px），必须按目标屏渲染。
+        img = QImage(round(width * dpr), round(item_h * dpr), QImage.Format.Format_RGB32)
+        img.setDevicePixelRatio(dpr)
+        img.fill(Qt.GlobalColor.white)
+        p = QPainter(img)
+        p.setFont(font)
+        baseline = (item_h - fm.height()) // 2 + fm.ascent()
+        p.drawText(4, baseline, sample)
+        p.end()
+        rows = [y / dpr for y in range(img.height())
+                if any(sum(img.pixelColor(x, y).getRgb()[:3]) < 600
+                       for x in range(img.width()))]
+        dy = int(round((rows[0] + rows[-1]) / 2 - item_h / 2)) if rows else 0
+        self._INK_DY_CACHE[key] = dy
+        return dy
+
     def _draw_item(self, p: QPainter, action, rect: QRect) -> None:
         hovered = action is self.activeAction() and action.isEnabled()
         if hovered:
@@ -603,17 +784,25 @@ class Menu(QMenu):
         use_icon_col = getattr(self, "_has_icon_col", True)
         icon_x = rect.x() + self._ICON_X            # 图标墨迹从弹层 x≈17 起
         text_x = rect.x() + (self._TEXT_X if use_icon_col else 12)
+        # 光学对齐：图标/勾/箭头的竖直中心跟文字墨迹中心走，不跟矩形中心
+        icon_cy = rect.center().y() + self._text_ink_dy(rect.height())
 
         # ---- 图标列：可勾选项显示强调色勾（与图标互斥），普通项显示 16×16 图标
         if action.isCheckable():
             if action.isChecked():
                 pm = icons.pixmap("check", ACCENT, 14)
                 p.drawPixmap(icon_x + (self._ICON_COL - 14) // 2,
-                             rect.y() + (rect.height() - 14) // 2, pm)
+                             round(icon_cy - 7), pm)
         elif not action.icon().isNull():
             pm = action.icon().pixmap(16, 16)
-            p.drawPixmap(icon_x + max(0, (self._ICON_COL - pm.width()) // 2),
-                         rect.y() + (rect.height() - pm.height()) // 2, pm)
+            # pixmap(16,16) 在高 DPR 屏返回 32×32、DPR=2 的位图：尺寸要除以
+            # DPR 换回逻辑值再参与居中（实测把设备像素当逻辑用，图标会左偏
+            # 3px、上偏 ~9px —— 就是「菜单图标和文字有偏离」的另一半真因）。
+            dpr = pm.devicePixelRatio() or 1.0
+            lw = round(pm.width() / dpr)
+            lh = round(pm.height() / dpr)
+            p.drawPixmap(icon_x + max(0, (self._ICON_COL - lw) // 2),
+                         round(icon_cy - lh / 2), pm)
 
         # ---- 正文
         p.save()
@@ -628,7 +817,7 @@ class Menu(QMenu):
 
         # ---- 右侧：快捷键（灰）或子菜单箭头
         if action.menu() is not None:
-            cx, cy = rect.right() - 12, rect.center().y()
+            cx, cy = rect.right() - 12, icon_cy     # 箭头跟图标同一条光学中线
             p.setPen(QPen(QColor(Color.text_tertiary), 1.6,
                           Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
                           Qt.PenJoinStyle.RoundJoin))

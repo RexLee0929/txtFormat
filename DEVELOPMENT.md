@@ -38,10 +38,11 @@ python -m venv .venv
 .venv\Scripts\python.exe tools\make_icon.py
 .venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --distpath artifacts txtFormat.spec
 
-:: 安装包
+:: 安装包：先把 VER 设为 installer\version.props 中的版本
+set /p VER=请输入版本号：
 .venv\Scripts\python.exe tools\make_payload.py
 cd installer\winforms && dotnet build -c Release && cd ..\..
-copy installer\winforms\bin\Release\net48\txtFormat-Setup.exe artifacts\txtFormat-1.0.4-setup.exe
+copy installer\winforms\bin\Release\net48\txtFormat-Setup.exe artifacts\txtFormat-%VER%-setup.exe
 ```
 
 `.cmd` 文件是 GBK 编码的，由 `tools\write_cmd.py` 生成 —— 用 UTF-8 编辑器直接改会在 cmd 窗口里出乱码。
@@ -49,17 +50,12 @@ copy installer\winforms\bin\Release\net48\txtFormat-Setup.exe artifacts\txtForma
 
 ### 版本号
 
-版本出现在四处，改的时候一次改齐，然后跑 `tools\check_version.py` 校验产物里的 PE 版本资源：
+版本唯一来源是 `installer\version.props`：运行时由 `app\core\version.py` 读取，`txtFormat.spec` 在打包时生成 PE 版本资源，安装器项目和 `build-installer.cmd` 也读取同一份配置。改版本只改 props；批处理标题由 `tools\write_cmd.py` 生成，修改后运行该脚本更新它。
 
-| 位置 | 作用 |
-| --- | --- |
-| `app\core\version.py` | 关于对话框、窗口标题、`--selftest` 报告 |
-| `tools\version_info.txt` | exe 属性 → 详细信息 |
-| `installer\version.props` | 安装向导标题、卸载登记项、程序集版本 |
-| `build-installer.cmd` | 安装包文件名（`tools\write_cmd.py` 的模板里） |
+构建后读取主程序与安装包的 PE 版本资源，人工与 props 对照（先将环境变量 `VER` 设为实际版本；脚本只打印结果，不自动断言版本一致）：
 
 ```bat
-.venv\Scripts\python.exe tools\check_version.py artifacts\txtFormat\txtFormat.exe artifacts\txtFormat-1.0.4-setup.exe
+.venv\Scripts\python.exe tools\check_version.py artifacts\txtFormat\txtFormat.exe artifacts\txtFormat-%VER%-setup.exe
 ```
 
 ## 改动范围
@@ -73,7 +69,7 @@ copy installer\winforms\bin\Release\net48\txtFormat-Setup.exe artifacts\txtForma
 | 新的内置正则 | `core/regexlib_data.py` 追加条目（说明 / 表达式 / 替换），打包自检会验证每一条都能编译 |
 | 自动化的新步骤 | `core/automation.py` 的 `STEP_TYPES` 注册 `StepSpec`（`run` + `summarize`）；带选项的步骤在 `ui/automation.py` 加一个配置小对话框 |
 | 新的转换格式 | `core/convert.py` 的 `CONVERTERS` 加一项（键、扩展名、界面文案、实现），命令栏的「转换」下拉按这张表自动填充，不用改界面 |
-| 命令栏按钮或菜单项 | `ui/main_window.py` 的 `_build_command_bar` / `_build_menus`；图标名必须在 `ui/icons.py` 里存在，否则是空白图标 |
+| 命令栏按钮或菜单项 | 命令栏改 `ui/main_window.py` 的 `_build_command_bar`；菜单项在 `ui/menu_def.py` 增加数据，并在 `MainWindow._command_table` 登记对应命令。图标名须在 `ui/icons.py` 中存在 |
 | 安装/卸载流程 | `installer/winforms/` 下的 `InstallForm.cs`（8 页向导）、`UninstallForm.cs`、`Program.cs`（注册表、快捷方式、解包、清理） |
 | 安装包里的文件 | 主程序文件由 `tools/make_payload.py` 的过滤规则决定；`README.md` / `LICENSE` / `custreg.txt` 由 csproj 的 `EmbeddedResource` 内嵌 |
 | 文档 | README 改完必须重建安装器（它被内嵌进 setup.exe，还写到安装目录）；新增根目录 md 或目录要加进同步白名单 |
@@ -83,7 +79,7 @@ copy installer\winforms\bin\Release\net48\txtFormat-Setup.exe artifacts\txtForma
 ```
 app/
   main.py            入口：QApplication、DWM 标题栏、命令行打开文件、单实例互斥
-  selftest.py        打包自检（--selftest / --menutest），按参数懒加载，正常启动不 import
+  selftest.py        打包自检（--selftest / --menutest / --popuptest），按参数懒加载
   core/              纯逻辑，无 Qt 依赖，可单独测试
     version.py       版本与作者信息
     encoding.py      编码与行尾识别、按原样回写；decode_first / read_text_any 统一编码探测
@@ -99,6 +95,8 @@ app/
     zhconv.py        简繁转换（LCMapStringEx）
     automation.py    自动化任务引擎：六种步骤、逐步执行、每步独立配置
     settings.py      选项持久化（程序目录 config.json，读入时逐项校验）
+    errlog.py        未捕获异常记录与错误提示
+    aboutmd.py       关于页面 Markdown 内容解析
     paths.py         源码/打包两种环境下的路径解析
   data/              typos.txt / screened.txt / pinyin.txt，可直接编辑扩充
   ui/
@@ -108,13 +106,16 @@ app/
     editor.py        行号、水线、当前行高亮、自动卷屏、阅读模式
     panels.py        文件列表面板、替换规则面板、自动化面板
     dialogs.py       选项 / 章节分割 / 合并 / 快速审核 / 转到 / 重编码 / 关于
+    fontdialog.py    字体搜索、参数选择与预览
+    errdialog.py     自绘错误提示
+    menu_def.py      菜单数据与命令标识
     automation.py    自动化任务的编辑对话框（AutomationDialog 与各步骤配置小框）
     task.py          后台 QThread 任务封装（同一时间只允许一个后台任务）
     main_window.py   菜单、命令栏、三栏布局、业务编排
 installer/
   version.props      版本与作者信息的唯一来源
   winforms/          自绘安装与卸载向导（C#，.NET Framework 4.8）
-tests/               test_core.py、test_ui.py、shot.py
+tests/               核心、界面、图标、禁用系统弹窗检查与截图脚本
 tools/               图标、载荷、截图、同步、版本校验、端到端验证
 ```
 
@@ -131,10 +132,14 @@ tools/               图标、载荷、截图、同步、版本校验、端到�
 ## 界面怎么验证
 
 ```bat
-.venv\Scripts\python.exe tests\test_core.py          :: 107 项：编码、数字、标点、正则、章节、整理、检查、分割、简繁、自动化
+.venv\Scripts\python.exe tests\test_core.py          :: 核心逻辑
 set QT_QPA_PLATFORM=offscreen
-.venv\Scripts\python.exe tests\test_ui.py            :: 83 项：打开→整理→查找→替换→保存→章节→审核→阅读模式→弹层圆角→自动化面板
+.venv\Scripts\python.exe tests\test_ui.py            :: 界面交互与字体选择器
+.venv\Scripts\python.exe tests\test_icons.py         :: 图标
+.venv\Scripts\python.exe tests\test_no_system_popup.py :: 扫描系统弹窗与提示音等禁用模式
 ```
+
+`test_ui.py` 会创建主窗口，而主窗口会读取和写入程序目录的 `config.json`；测试前应在隔离副本中运行，避免影响个人设置。后台任务测试会等待事件循环处理结果；离屏检查不能替代真实 Windows 桌面的弹层验证。
 
 截图按需生成，产物只留在本机 `docs\`（不进发布区）：
 
@@ -144,18 +149,23 @@ set QT_QPA_PLATFORM=offscreen
 .venv\Scripts\python.exe tests\shot.py out.png 1440 900
 ```
 
-打包产物自带自检，用来确认资源与运行库都完整（不弹窗，结果写 JSON）：
+打包产物自带自检，用来检查资源和界面（结果写 JSON）。下列菜单与弹层检查使用真实窗口；如果前面设置过离屏模式，先清除该变量：
 
 ```bat
+set QT_QPA_PLATFORM=
 artifacts\txtFormat\txtFormat.exe --selftest %TEMP%\tfself
+artifacts\txtFormat\txtFormat.exe --menutest %TEMP%\tfmenu
+artifacts\txtFormat\txtFormat.exe --popuptest %TEMP%\tfpopup
 ```
+
+分别检查核心资源与界面、菜单结构与圆角裁切、字体下拉弹层几何；查看各目录下对应的 JSON 和退出码。`--popuptest` 需要真实窗口环境，另保存弹层截图；可用 `tools\check_popup_edge.py <输出目录> <size|line|weight>` 按报告坐标检查边缘。
 
 安装包做端到端验证：静默安装 → 检查文件、快捷方式、注册表 → 从安装目录跑自检 → 静默卸载 →
 确认目录、开始菜单项、`App Paths` 与卸载登记键都已清理。脚本不写死版本号：
 期望版本从 `app\core\version.py` 动态读（`expect_version()`），升版本不用改它。
 
 ```bat
-.venv\Scripts\python.exe tools\e2e_installer.py artifacts\txtFormat-1.0.4-setup.exe
+.venv\Scripts\python.exe tools\e2e_installer.py artifacts\txtFormat-%VER%-setup.exe
 ```
 
 ## 坑
@@ -183,9 +193,8 @@ artifacts\txtFormat\txtFormat.exe --selftest %TEMP%\tfself
   临时目录再启动，由副本删原目录。
 - **整篇替换后 Ctrl+Z 撤不回去、光标跳走**：`setPlainText` 会清空撤消栈。对策：全文替换统一走
   `_replace_document_text()`，用 QTextCursor 编辑块整篇替换，撤销栈与光标位置都保留。
-- **`QFontDialog.getFont()` 解包崩（`'bool' object has no attribute 'family'`）**：PySide6 的静态方法返回值
-  与 PyQt 顺序不同，且选点阵字体时字号可能返回 -1。对策：实例化 `QFontDialog` + `DontUseNativeDialog`，
-  自己判断返回值。
+- **旧字体对话框的 `QFontDialog.getFont()` 解包曾崩溃**：PySide6 的静态方法返回值与部分 PyQt 教程的顺序不同，
+  选点阵字体时字号也可能为 -1。现在改用 `ui/fontdialog.py` 的自绘字体选择器，读取 `selected()` 并校验字号；不要把旧的静态方法直接搬回来。
 - **菜单弹层四角发黑、底部一条暗线**：`WA_TranslucentBackground` 的半透明像素在 DPR 除不尽时被 DWM
   混成暗色。对策：弹层窗口完全不透明（palette 底色 = 卡片白）+ `setMask` 圆角裁切 + paintEvent 先整面
   `fillRect` 画实，别用半透明背景方案。

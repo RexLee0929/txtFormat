@@ -36,6 +36,7 @@ _RANGES: dict[str, tuple[int, int]] = {
     "hard_return_width": (10, 500),
     "check_level": (1, 3),
     "font_size": (7, 72),
+    "font_weight": (100, 900),
     "line_height_percent": (100, 300),
     "settings_version": (1, 99),
 }
@@ -101,6 +102,8 @@ class Settings:
     # ---- 编辑器 ----
     font_family: str = "Microsoft YaHei UI"
     font_size: int = 12
+    font_weight: int = 400            # 字重：400 常规 / 500 中黑 / 700 加粗
+    font_italic: bool = False         # 斜体（西文真斜体，中文为仿斜体）
     line_height_percent: int = 160
     show_statusbar: bool = True
     word_wrap: bool = True

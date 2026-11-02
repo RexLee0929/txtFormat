@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 
@@ -18,10 +19,30 @@ from .core.errlog import install_excepthook
 from .core.paths import asset
 from .core.version import APP_NAME, APP_VERSION
 from .ui.main_window import MainWindow
-from .ui.theme import apply_dwm_chrome
+from .ui.theme import apply_dwm_chrome, stylesheet
 
 #: 单实例互斥用的本地套接字名（规范 §七.6：双开不开两个窗口，激活已有窗口）
-_INSTANCE_KEY = APP_NAME + "-instance"
+#:
+#: 名字里必须带**程序目录**的短散列：安装版（Program Files）与绿色版（U 盘、桌面）
+#: 是两套独立的程序与配置，共用一个管道名会互相抢 —— 后启动的那个连上就退出，
+#: 用户看到的是「双击了没反应」，而窗口其实在另一个目录的那份程序里。
+#:
+#: 目录取 ``sys.executable`` 所在路径（打包后），不能用 ``__file__``：
+#: PyInstaller 每次运行解包到不同的 _MEIPASS 临时目录，散列会每次变，
+#: 单实例就彻底失效了。源码运行时退回包目录的父目录（仓库根）。
+def _app_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _instance_key() -> str:
+    # normcase：Windows 下大小写与斜杠写法不同不该算成两个程序
+    tag = hashlib.md5(os.path.normcase(_app_dir()).encode("utf-8")).hexdigest()[:8]
+    return f"{APP_NAME}-instance-{tag}"
+
+
+_INSTANCE_KEY = _instance_key()
 
 
 def _already_running() -> bool:
@@ -97,6 +118,11 @@ def main() -> int:
     app.setOrganizationName("txtFormat")
     app.setStyle("Fusion")
     app.setFont(QFont("Microsoft YaHei UI", 10))
+    # 主题挂在 **QApplication 全局**，不能只挂主窗口：样式表沿 QObject 父子链
+    # 传播，独立弹出的对话框/弹层（parent 缺省为 None 的场景，比如自检脚本、
+    # 未来的托盘菜单）不在主窗口链上，就会退回系统原生外观 —— 实测截屏里
+    # 「确定」按钮变成 Win32 灰渐变，跟程序风格完全两族。
+    app.setStyleSheet(stylesheet())
 
     icon_path = asset("app.ico")
     if os.path.exists(icon_path):
@@ -111,6 +137,11 @@ def main() -> int:
     if "--menutest" in sys.argv:
         from .selftest import menutest
         return menutest(app, _flag_dir("--menutest"))
+
+    # 隐藏下拉弹层几何自检：txtFormat.exe --popuptest <输出目录>
+    if "--popuptest" in sys.argv:
+        from .selftest import popuptest
+        return popuptest(app, _flag_dir("--popuptest"))
 
     # 单实例互斥（规范 §七.6：程序已在运行 → 激活已有窗口，不开第二个）
     if _already_running():
