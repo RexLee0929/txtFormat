@@ -1,7 +1,8 @@
-# 更新日志
+# Changelog
 
-本文件记录 txtFormat 每个已发布版本的用户可见变化。
-格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
+本项目的所有显著变更都记录在这个文件里。
+
+格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 ## [1.0.5] - 2026-11-02
 
